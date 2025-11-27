@@ -1,13 +1,14 @@
-// agent.js - Web UI Agent dengan navbar + ringkasan + daftar shipments
-
+// agent.js - Web UI Agent untuk Smart Locker (Express + Axios)
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
+
 const app = express();
 
+// === CONFIG BACKEND ===
+// contoh: SMARTLOCKER_API_BASE=http://127.0.0.1:3000
 const API_BASE_DEFAULT =
   process.env.SMARTLOCKER_API_BASE || "http://127.0.0.1:3000";
-const PORT = process.env.AGENT_PORT || 4000;
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -17,832 +18,712 @@ function normalizeBaseUrl(url) {
   return url.replace(/\/+$/, "");
 }
 
-async function fetchCouriers(apiBase) {
-  try {
-    const resp = await axios.get(apiBase + "/api/couriers");
-    return resp.data?.data || [];
-  } catch (err) {
-    console.error("fetchCouriers error:", err.response?.data || err.message);
-    return [];
-  }
-}
-
+// --- helper layout HTML sederhana ---
 function layout(pageTitle, activeTab, bodyHtml) {
   return `
 <!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="UTF-8" />
-  <title>${pageTitle}</title>
+  <title>Smart Locker – Agent | ${pageTitle}</title>
   <style>
     body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f5f7fb;
       margin: 0;
-      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f3f4f6;
     }
-    .nav {
+    .navbar {
       background: #111827;
-      color: #e5e7eb;
-      padding: 10px 24px;
+      color: white;
+      padding: 10px 40px;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
-    .nav-title {
+    .navbar .title {
       font-weight: 600;
-      font-size: 16px;
     }
-    .nav-links a {
+    .navbar a {
       color: #9ca3af;
-      text-decoration: none;
       margin-left: 16px;
+      text-decoration: none;
       font-size: 14px;
     }
-    .nav-links a.active {
-      color: #f9fafb;
+    .navbar a.active {
+      color: #ffffff;
       font-weight: 600;
-      border-bottom: 2px solid #2563eb;
-      padding-bottom: 2px;
     }
     .container {
-      max-width: 900px;
-      margin: 24px auto 40px auto;
-      background: white;
+      max-width: 1100px;
+      margin: 30px auto;
+      background: #ffffff;
+      padding: 24px 28px;
       border-radius: 12px;
-      padding: 24px 28px 32px 28px;
-      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
     }
     h1 {
       margin-top: 0;
       font-size: 22px;
-      text-align: left;
     }
-    p.desc {
-      margin-top: 4px;
-      margin-bottom: 16px;
+    .subtitle {
       font-size: 13px;
       color: #6b7280;
-    }
-    label {
-      display: block;
-      margin-top: 12px;
-      font-weight: 600;
-      font-size: 14px;
-    }
-    input[type="text"],
-    select,
-    textarea {
-      width: 100%;
-      margin-top: 4px;
-      padding: 8px 10px;
-      border-radius: 8px;
-      border: 1px solid #d1d5db;
-      font-size: 14px;
-      box-sizing: border-box;
-    }
-    textarea {
-      min-height: 80px;
-      resize: vertical;
-    }
-    .row {
-      display: flex;
-      gap: 12px;
-    }
-    .row > div {
-      flex: 1;
-    }
-    button {
-      margin-top: 20px;
-      padding: 10px 16px;
-      border-radius: 999px;
-      border: none;
-      background: #2563eb;
-      color: white;
-      font-weight: 600;
-      cursor: pointer;
-      font-size: 14px;
-    }
-    .status {
-      margin-top: 12px;
-      font-size: 14px;
-    }
-    .status.ok { color: #16a34a; }
-    .status.err { color: #dc2626; }
-    pre {
-      background: #0f172a;
-      color: #e5e7eb;
-      padding: 12px;
-      border-radius: 8px;
-      font-size: 12px;
-      overflow-x: auto;
-      margin-top: 12px;
-      max-height: 260px;
+      margin-bottom: 18px;
     }
     .badge {
       display: inline-block;
       padding: 2px 8px;
       border-radius: 999px;
       font-size: 11px;
-      background: #e5e7eb;
-      color: #374151;
-      margin-left: 6px;
+      font-weight: 600;
     }
-    h3 {
-      margin-top: 24px;
-      margin-bottom: 8px;
-      font-size: 16px;
-    }
+    .badge-online { background:#dcfce7; color:#166534; }
+    .badge-offline { background:#fee2e2; color:#991b1b; }
+    .badge-unknown { background:#e5e7eb; color:#374151; }
+    .badge-active { background:#dbeafe; color:#1d4ed8; }
+    .badge-inactive { background:#fef3c7; color:#92400e; }
+
     table {
       width: 100%;
       border-collapse: collapse;
-      margin-top: 8px;
       font-size: 13px;
     }
     th, td {
-      border: 1px solid #e5e7eb;
-      padding: 6px 8px;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 8px 10px;
       text-align: left;
-      vertical-align: top;
     }
     th {
-      background: #f3f4f6;
+      background: #f9fafb;
+      font-weight: 600;
+      font-size: 12px;
+      color:#374151;
     }
-    .tag-ok {
-      color: #065f46;
-      background: #d1fae5;
-      border-radius: 999px;
-      padding: 2px 8px;
-      font-size: 11px;
-      white-space: nowrap;
+    tr:nth-child(even) td {
+      background: #f9fafb;
     }
-    .tag-bad {
-      color: #991b1b;
-      background: #fee2e2;
-      border-radius: 999px;
+    .btn {
+      display: inline-block;
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 12px;
+      border: none;
+      cursor: pointer;
+      text-decoration:none;
+    }
+    .btn-primary { background:#2563eb; color:white; }
+    .btn-secondary { background:#e5e7eb; color:#111827; }
+    .btn-danger { background:#ef4444; color:white; }
+    .btn-ghost { background:transparent; color:#2563eb; }
+    .form-row {
+      display:flex;
+      gap:12px;
+      margin-bottom:8px;
+    }
+    .form-col { flex:1; }
+    label {
+      display:block;
+      font-size:12px;
+      margin-bottom:4px;
+      color:#374151;
+    }
+    input[type="text"],
+    input[type="number"],
+    textarea,
+    select {
+      width:100%;
+      border-radius:8px;
+      border:1px solid #d1d5db;
+      padding:7px 9px;
+      font-size:13px;
+      box-sizing:border-box;
+    }
+    textarea { resize: vertical; min-height:70px; }
+    .muted {
+      font-size: 12px;
+      color:#6b7280;
+    }
+    .mt-2 { margin-top:8px; }
+    .mt-3 { margin-top:12px; }
+    .mt-4 { margin-top:16px; }
+    .mb-2 { margin-bottom:8px; }
+    .text-right { text-align:right; }
+    .text-center { text-align:center; }
+    .pill {
       padding: 2px 8px;
-      font-size: 11px;
-      white-space: nowrap;
+      border-radius: 999px;
+      background:#f3f4f6;
+      font-size:11px;
     }
   </style>
 </head>
 <body>
-  <div class="nav">
-    <div class="nav-title">Smart Locker – Agent</div>
-    <div class="nav-links">
-      <a href="/" class="${activeTab === "form" ? "active" : ""}">Input Pengiriman</a>
-      <a href="/list" class="${activeTab === "list" ? "active" : ""}">Daftar Pengiriman</a>
+  <div class="navbar">
+    <div class="title">Smart Locker – Agent</div>
+    <div>
+      <a href="/shipments/new" class="${activeTab === "new" ? "active" : ""}">Input Pengiriman</a>
+      <a href="/shipments" class="${activeTab === "shipments" ? "active" : ""}">Daftar Pengiriman</a>
       <a href="/couriers" class="${activeTab === "couriers" ? "active" : ""}">Daftar Kurir</a>
       <a href="/lockers" class="${activeTab === "lockers" ? "active" : ""}">Daftar Locker</a>
+      <a href="/manual-resi" class="${activeTab === "manual" ? "active" : ""}">Resi Manual User</a>
     </div>
   </div>
-  ${bodyHtml}
+  <div class="container">
+    ${bodyHtml}
+  </div>
 </body>
-</html>
-`;
+</html>`;
 }
 
-function renderFormPage({
-  baseUrl,
-  formData = {},
-  status = "",
-  statusClass = "",
-  responseJson = "",
-  validation = [],
-  summary = null,
-  couriers = [],
-}) {
-  baseUrl = baseUrl || API_BASE_DEFAULT;
+// ====================== ROUTES UI =======================
+
+// redirect root
+app.get("/", (req, res) => res.redirect("/shipments/new"));
+
+// ---------- Input Pengiriman ----------
+app.get("/shipments/new", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+
+  let courierOptionsHtml = "";
+  try {
+    const resp = await axios.get(apiBase + "/api/couriers");
+    const list = (resp.data?.data || []).filter((c) => c.state === "active");
+    courierOptionsHtml = list
+      .map(
+        (c) =>
+          `<option value="${c.courierId}">${c.company.toUpperCase()} – ${c.name} (${c.plate})</option>`
+      )
+      .join("");
+  } catch (err) {
+    courierOptionsHtml = "";
+  }
 
   const body = `
-  <div class="container">
     <h1>Input Pengiriman</h1>
-    <label>Pilih Kurir</label>
-    <select id="courierSelect" name="courierId">
-      <option value="">-- Pilih kurir --</option>
-      ${
-        couriers
-          .map(
-            (c) => `
-        <option value="${c.courierId}"
-                data-company="${c.company}"
-                data-plate="${c.plate}">
-          ${c.company} – ${c.name} – ${c.plate}
-        </option>`
-          )
-          .join("")
-      }
-    </select>
-    <p class="desc">
-      Input data paket untuk dikirim ke locker dan diproses oleh server Smart Locker.<br/>
-      Backend: <code>${baseUrl}</code>
-    </p>
+    <div class="subtitle">
+      Backend: <code>${apiBase}</code><br/>
+      Masukkan beberapa nomor resi sekaligus untuk satu locker & satu kurir.
+    </div>
 
-    <form method="POST" action="/">
-      <div class="row">
-        <div>
+    <form method="POST" action="/shipments/new">
+      <div class="form-row">
+        <div class="form-col">
           <label>Locker ID</label>
-          <input type="text" name="lockerId" placeholder="mis: locker01" value="${
-            formData.lockerId || ""
-          }" />
+          <input type="text" name="lockerId" placeholder="mis: locker01" required />
         </div>
-        <div>
-          <label>Jenis Kurir</label>
-          <input id="courierTypeInput" type="text" name="courierType" placeholder="mis: AnterAja"
-                 value="${formData.courierType || ""}" readonly />
+        <div class="form-col">
+          <label>Pilih Kurir dari Pool</label>
+          <select name="courierId" required>
+            <option value="">-- Pilih Kurir --</option>
+            ${courierOptionsHtml}
+          </select>
         </div>
       </div>
 
-      <label>Plat Nomor Kendaraan Kurir (opsional)</label>
-      <input id="courierPlateInput" type="text" name="courierPlate" placeholder="mis: B 1234 CD" value="${
-        formData.courierPlate || ""
-      }" readonly />
+      <div class="form-row">
+        <div class="form-col">
+          <label>Nama Penerima</label>
+          <input type="text" name="receiverName" placeholder="Nama customer" />
+        </div>
+        <div class="form-col">
+          <label>No. HP Penerima</label>
+          <input type="text" name="receiverPhone" placeholder="08xxxxxxxxxx" />
+        </div>
+      </div>
 
-      <label>Nama Penerima (opsional)</label>
-      <input type="text" name="receiverName" placeholder="mis: Muhammad Muflih Fasya" value="${
-        formData.receiverName || ""
-      }" />
+      <div class="form-row">
+        <div class="form-col">
+          <label>Customer ID (6 digit)</label>
+          <input type="text" name="customerId" placeholder="contoh: 384912" maxlength="6" />
+        </div>
+        <div class="form-col">
+          <label>Tipe Barang (opsional)</label>
+          <input type="text" name="itemType" placeholder="Dokumen / Paket kecil / dll" />
+        </div>
+      </div>
 
-      <label>No. HP Penerima (opsional)</label>
-      <input type="text" name="receiverPhone" placeholder="mis: 08xxxxxxxxxx" value="${
-        formData.receiverPhone || ""
-      }" />
+      <div class="mt-3">
+        <label>Daftar Nomor Resi (satu per baris)</label>
+        <textarea name="resiList" placeholder="11002899918893&#10;10008015952761" required></textarea>
+        <div class="muted mt-2">Setiap baris akan dibuat sebagai satu shipment dan dimasukkan ke pendingResi locker.</div>
+      </div>
 
-      <label>Customer ID / Info (opsional)</label>
-      <input type="text" name="customerId" placeholder="mis: nomor HP / email" value="${
-        formData.customerId || ""
-      }" />
-
-      <label>Jenis Barang (opsional)</label>
-      <input type="text" name="itemType" placeholder="mis: Elektronik, Dokumen, dll" value="${
-        formData.itemType || ""
-      }" />
-
-      <label>Daftar Nomor Resi
-        <span class="badge">satu resi per baris</span>
-      </label>
-      <textarea name="resiList" placeholder="11002899918893&#10;10008015952761">${
-        formData.resiList || ""
-      }</textarea>
-
-      <button type="submit">Kirim ke Server</button>
+      <div class="mt-4 text-right">
+        <button class="btn btn-secondary" type="reset">Reset</button>
+        <button class="btn btn-primary" type="submit">Simpan & Assign ke Locker</button>
+      </div>
     </form>
+  `;
 
-    <div class="status ${statusClass}">${status}</div>
+  res.send(layout("Input Pengiriman", "new", body));
+});
 
-    ${
-      summary
-        ? `
-      <h3>Ringkasan Data Paket</h3>
-      <table>
-        <tbody>
-          <tr><th>Locker ID</th><td>${summary.lockerId || "-"}</td></tr>
-          <tr><th>Courier ID</th><td>${summary.courierId || "-"}</td></tr>
-          <tr><th>Plat Kurir</th><td>${summary.courierPlate || "-"}</td></tr>
-          <tr><th>Nama Penerima</th><td>${summary.receiverName || "-"}</td></tr>
-          <tr><th>No. HP Penerima</th><td>${summary.receiverPhone || "-"}</td></tr>
-          <tr><th>Customer ID / Info</th><td>${summary.customerId || "-"}</td></tr>
-          <tr><th>Jenis Barang</th><td>${summary.itemType || "-"}</td></tr>
-          <tr><th>Daftar Nomor Resi</th><td>${
-            summary.resiArray && summary.resiArray.length
-              ? summary.resiArray.join("<br/>")
-              : "-"
-          }</td></tr>
-        </tbody>
-      </table>
-      `
-        : ""
+app.post("/shipments/new", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  try {
+    const {
+      lockerId,
+      courierId,
+      receiverName,
+      receiverPhone,
+      customerId,
+      itemType,
+      resiList,
+    } = req.body;
+
+    const lines = (resiList || "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    // Get courier details from pool
+    const courierResp = await axios.get(apiBase + "/api/couriers");
+    const courierList = courierResp.data?.data || [];
+    const selectedCourier = courierList.find((c) => c.courierId === courierId);
+
+    if (!selectedCourier) {
+      throw new Error("Kurir tidak ditemukan di pool");
     }
 
-    ${
-      validation && validation.length
-        ? `
-      <h3>Hasil Validasi Resi</h3>
+    await axios.post(apiBase + "/api/shipments", {
+      lockerId,
+      courierType: selectedCourier.company,
+      courierPlate: selectedCourier.plate,
+      courierId: courierId,
+      receiverName,
+      receiverPhone,
+      customerId,
+      itemType,
+      resiList: lines,
+    });
+
+    res.redirect("/shipments");
+  } catch (err) {
+    console.error("POST /shipments/new error:", err.response?.data || err.message);
+    res.status(500).send(
+      layout(
+        "Input Pengiriman",
+        "new",
+        `<h1>Gagal menyimpan pengiriman</h1>
+         <pre>${JSON.stringify(err.response?.data || err.message, null, 2)}</pre>
+         <a class="btn btn-secondary" href="/shipments/new">Kembali</a>`
+      )
+    );
+  }
+});
+
+// ---------- Daftar Pengiriman ----------
+app.get("/shipments", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  try {
+    const resp = await axios.get(apiBase + "/api/shipments?limit=200");
+    const list = resp.data?.data || [];
+
+    const rows = list
+      .map((s) => {
+        const status = s.status || "-";
+        const created =
+          s.createdAt ? new Date(s.createdAt).toLocaleString("id-ID") : "-";
+        const delivered =
+          s.deliveredToLockerAt
+            ? new Date(s.deliveredToLockerAt).toLocaleString("id-ID")
+            : "-";
+
+        return `
+          <tr>
+            <td>${s.resi}</td>
+            <td>${s.courierType}</td>
+            <td>${s.lockerId}</td>
+            <td>${s.customerId || "-"}</td>
+            <td><code style="font-size:11px;">${s.token || "-"}</code></td>
+            <td>${status}</td>
+            <td>${created}</td>
+            <td>${delivered}</td>
+            <td class="text-right">
+              <a class="btn btn-ghost" href="${apiBase}/api/debug/shipment/${encodeURIComponent(
+          s.resi
+        )}" target="_blank">Debug</a>
+              <a class="btn btn-danger" href="/shipments/delete/${
+                s._id
+              }" onclick="return confirm('Hapus shipment ini?')">Hapus</a>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const body = `
+      <h1>Daftar Pengiriman</h1>
+      <div class="subtitle">
+        Backend: <code>${apiBase}</code> — maksimum 200 data terakhir.
+      </div>
+
       <table>
         <thead>
           <tr>
-            <th>No</th>
-            <th>Nomor Resi</th>
+            <th>Resi</th>
+            <th>Kurir</th>
+            <th>Locker</th>
+            <th>Customer ID</th>
+            <th>Token</th>
             <th>Status</th>
-            <th>Keterangan</th>
+            <th>Dibuat</th>
+            <th>Delivered ke Locker</th>
+            <th class="text-right">Aksi</th>
           </tr>
         </thead>
         <tbody>
-          ${validation
-            .map(
-              (v, idx) => `
-          <tr>
-            <td>${idx + 1}</td>
-            <td>${v.resi}</td>
-            <td>${
-              v.valid
-                ? '<span class="tag-ok">✅ Valid</span>'
-                : '<span class="tag-bad">❌ Tidak Valid</span>'
-            }</td>
-            <td>${v.message || ""}</td>
-          </tr>`
-            )
-            .join("")}
+          ${rows || `<tr><td colspan="9" class="text-center">Belum ada data.</td></tr>`}
         </tbody>
       </table>
-      `
-        : ""
-    }
+    `;
 
-    ${responseJson ? `<pre>${responseJson}</pre>` : ""}
-    <script>
-      (function() {
-        const sel = document.getElementById('courierSelect');
-        const typeInput = document.getElementById('courierTypeInput');
-        const plateInput = document.getElementById('courierPlateInput');
-        if (!sel || !typeInput || !plateInput) return;
-        sel.addEventListener('change', function () {
-          const opt = this.options[this.selectedIndex];
-          typeInput.value = opt ? (opt.getAttribute('data-company') || '') : '';
-          plateInput.value = opt ? (opt.getAttribute('data-plate') || '') : '';
-        });
-      })();
-    </script>
-  </div>
-  `;
-
-  return layout("Smart Locker – Agent Panel", "form", body);
-}
-
-function renderListPage(shipments, baseUrl) {
-  const body = `
-  <div class="container">
-    <h1>Daftar Pengiriman</h1>
-    <p class="desc">
-      Data ini diambil dari database (koleksi <b>shipments</b>) melalui backend Smart Locker.<br/>
-      Backend: <code>${baseUrl}</code>
-    </p>
-
-    <table>
-      <thead>
-        <tr>
-          <th>No</th>
-          <th>Locker</th>
-          <th>Kurir</th>
-          <th>Plat</th>
-          <th>Resi</th>
-          <th>Nama Penerima</th>
-          <th>No HP</th>
-          <th>Jenis Barang</th>
-          <th>Waktu Input</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${
-          shipments.length === 0
-            ? `<tr><td colspan="9">Belum ada data shipments.</td></tr>`
-            : shipments
-                .map(
-                  (s, idx) => `
-        <tr>
-          <td>${idx + 1}</td>
-          <td>${s.lockerId || "-"}</td>
-          <td>${s.courierType || "-"}</td>
-          <td>${s.courierPlate || "-"}</td>
-          <td>${s.resi || "-"}</td>
-          <td>${s.receiverName || "-"}</td>
-          <td>${s.receiverPhone || "-"}</td>
-          <td>${s.itemType || "-"}</td>
-          <td>${
-            s.createdAt ? new Date(s.createdAt).toLocaleString("id-ID") : "-"
-          }</td>
-        </tr>`
-                )
-                .join("")
-        }
-      </tbody>
-    </table>
-  </div>
-  `;
-
-  return layout("Daftar Pengiriman – Smart Locker", "list", body);
-}
-
-function renderCouriersPage({ couriers = [], baseUrl = API_BASE_DEFAULT, status = "", statusClass = "", formData = {} } = {}) {
-
-  const body = `
-  <div class="container">
-    <h1>Daftar Kurir</h1>
-    <p class="desc">Kelola pool kurir yang akan muncul pada pilihan "Pilih Kurir" saat input pengiriman.<br/>Backend: <code>${baseUrl}</code></p>
-
-    <form method="POST" action="/couriers">
-      <label>Perusahaan / Jenis Kurir</label>
-      <select name="company">
-        <option value="anteraja" ${formData.company === 'anteraja' ? 'selected' : ''}>AnterAja</option>
-        <option value="jne" ${formData.company === 'jne' ? 'selected' : ''}>JNE</option>
-        <option value="jnt" ${formData.company === 'jnt' ? 'selected' : ''}>J&amp;T Express</option>
-        <option value="sicepat" ${formData.company === 'sicepat' ? 'selected' : ''}>SiCepat</option>
-        <option value="tiki" ${formData.company === 'tiki' ? 'selected' : ''}>TIKI</option>
-        <option value="ninja" ${formData.company === 'ninja' ? 'selected' : ''}>Ninja Xpress</option>
-        <option value="lionparcel" ${formData.company === 'lionparcel' ? 'selected' : ''}>Lion Parcel</option>
-        <option value="wahana" ${formData.company === 'wahana' ? 'selected' : ''}>Wahana</option>
-        <option value="pos" ${formData.company === 'pos' ? 'selected' : ''}>POS Indonesia</option>
-      </select>
-
-      <label>Nama Kurir</label>
-      <input type="text" name="name" placeholder="mis: Mas Budi" value="${formData.name || ""}" />
-
-      <label>Plat Nomor</label>
-      <input type="text" name="plate" placeholder="mis: B 1234 CD" value="${formData.plate || ""}" />
-
-      <button type="submit">Simpan Kurir</button>
-    </form>
-
-    <div class="status ${statusClass}">${status}</div>
-
-    <h3>Pool Kurir</h3>
-    <table>
-      <thead>
-        <tr>
-          <th>No</th>
-          <th>Courier ID</th>
-          <th>Perusahaan</th>
-          <th>Nama</th>
-          <th>Plat</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${
-          couriers.length === 0
-            ? `<tr><td colspan="5">Belum ada data kurir.</td></tr>`
-            : couriers
-                .map(
-                  (c, idx) => `
-        <tr>
-          <td>${idx + 1}</td>
-          <td>${c.courierId || "-"}</td>
-          <td>${c.company || "-"}</td>
-          <td>${c.name || "-"}</td>
-          <td>${c.plate || "-"}</td>
-        </tr>`
-                )
-                .join("")
-        }
-      </tbody>
-    </table>
-  </div>
-  `;
-
-  return layout("Daftar Kurir – Smart Locker", "couriers", body);
-}
-
-function renderLockersPage({ lockers = [], baseUrl = API_BASE_DEFAULT, status = "", statusClass = "", debug = null } = {}) {
-  const body = `
-  <div class="container">
-    <h1>Locker Client Pool</h1>
-    <p class="desc">Daftar semua locker (ESP32) yang pernah berinteraksi dengan server.<br/>Backend: <code>${baseUrl}</code></p>
-
-    <table>
-      <thead>
-        <tr>
-          <th>Locker ID</th>
-          <th>Token</th>
-          <th>Pending Resi</th>
-          <th>Aktif</th>
-          <th>Last Heartbeat</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${
-          lockers.length === 0
-            ? `<tr><td colspan="5" style="text-align:center;">Belum ada locker yang terdaftar.</td></tr>`
-            : lockers
-                .map(
-                  (l) => `
-        <tr>
-          <td>${l.lockerId}</td>
-          <td><code>${l.lockerToken || "-"}</code></td>
-          <td style="text-align:center">${(l.pendingResi && l.pendingResi.length) || (l.pendingCount || 0)}</td>
-          <td>${l.isActive === false ? 'OFF' : 'ON'}</td>
-          <td>${l.lastHeartbeat ? new Date(l.lastHeartbeat).toLocaleString() : "-"}</td>
-        </tr>`
-                )
-                .join("")
-        }
-      </tbody>
-    </table>
-
-    ${debug ? `<h3 style="margin-top:18px">Debug - backend response</h3>
-    <pre style="background:#0b1220;color:#e6eef6;padding:10px;border-radius:6px;overflow:auto;max-height:240px">${debug}</pre>` : ""}
-    </table>
-  </div>
-  `;
-
-  return layout("Locker Client Pool – Smart Locker", "lockers", body);
-}
-
-/* ROUTES */
-
-// GET: form
-app.get("/", async (req, res) => {
-  const apiBase = API_BASE_DEFAULT;
-  const couriers = await fetchCouriers(apiBase);
-
-  res.send(
-    renderFormPage({
-      baseUrl: apiBase,
-      formData: {},
-      status: "",
-      statusClass: "",
-      responseJson: "",
-      validation: [],
-      summary: null,
-      couriers,
-    })
-  );
+    res.send(layout("Daftar Pengiriman", "shipments", body));
+  } catch (err) {
+    console.error("GET /shipments view error:", err.response?.data || err.message);
+    res
+      .status(500)
+      .send(layout("Daftar Pengiriman", "shipments", "<h1>Error load data</h1>"));
+  }
 });
 
-// GET: daftar kurir (manage couriers)
+// tombol hapus shipment
+app.get("/shipments/delete/:id", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  try {
+    await axios.delete(apiBase + "/api/shipments/" + req.params.id);
+  } catch (err) {
+    console.error("DELETE shipment error:", err.response?.data || err.message);
+  }
+  res.redirect("/shipments");
+});
+
+// ---------- Daftar Kurir ----------
 app.get("/couriers", async (req, res) => {
-  const apiBase = normalizeBaseUrl(API_BASE_DEFAULT);
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
   try {
-    const couriers = await fetchCouriers(apiBase);
-    res.send(renderCouriersPage({ couriers, baseUrl: apiBase }));
-  } catch (err) {
-    console.error("fetch couriers error:", err.message);
-    res.send(renderCouriersPage({ couriers: [], baseUrl: apiBase, status: "Gagal mengambil daftar kurir.", statusClass: "err" }));
-  }
-});
+    const resp = await axios.get(apiBase + "/api/couriers");
+    const list = resp.data?.data || [];
 
-// GET: daftar locker (show Locker Client Pool)
-app.get("/lockers", async (req, res) => {
-  const apiBase = normalizeBaseUrl(API_BASE_DEFAULT);
-  try {
-    const resp = await axios.get(apiBase + "/api/lockers");
-    const lockers = resp.data?.data || [];
-    // include raw response for debugging if result empty
-    const debug = lockers.length === 0 ? JSON.stringify({ status: resp.status, data: resp.data }, null, 2) : null;
-    console.log(`/lockers -> fetched ${lockers.length} lockers (status ${resp.status})`);
-    res.send(renderLockersPage({ lockers, baseUrl: apiBase, debug }));
-  } catch (err) {
-    console.error("fetch lockers error:", err.response?.data || err.message);
-    const debug = err.response?.data ? JSON.stringify(err.response.data, null, 2) : (err.message || String(err));
-    res.send(renderLockersPage({ lockers: [], baseUrl: apiBase, status: "Gagal mengambil daftar locker.", statusClass: "err", debug }));
-  }
-});
+    const rows = list
+      .map((c) => {
+        let badgeClass = "badge-unknown";
+        let badgeText = c.state || "unknown";
 
-// DEBUG: proxy raw response from backend /api/lockers
-app.get("/debug/lockers", async (req, res) => {
-  const apiBase = normalizeBaseUrl(API_BASE_DEFAULT);
-  try {
-    const resp = await axios.get(apiBase + "/api/lockers");
-    res.json({ ok: true, status: resp.status, data: resp.data });
-  } catch (err) {
-    console.error("/debug/lockers error:", err.response?.data || err.message);
-    const code = err.response?.status || 500;
-    return res.status(code).json({ ok: false, error: err.response?.data || err.message || 'unknown' });
-  }
-});
+        if (c.state === "active") {
+          badgeClass = "badge-active";
+          badgeText = "ACTIVE";
+        } else if (c.state === "ongoing") {
+          badgeClass = "badge-inactive";
+          badgeText = "ONGOING";
+        } else if (c.state === "inactive") {
+          badgeClass = "badge-inactive";
+          badgeText = "INACTIVE";
+        }
 
-// POST: tambah kurir ke backend
-app.post("/couriers", async (req, res) => {
-  const { company, name, plate } = req.body;
-  const apiBase = normalizeBaseUrl(API_BASE_DEFAULT);
-
-  const formData = { company, name, plate };
-
-  if (!company || !name || !plate) {
-    try {
-      const couriers = await fetchCouriers(apiBase);
-      return res.send(renderCouriersPage({ couriers, baseUrl: apiBase, status: "Perusahaan, nama kurir dan plat wajib diisi.", statusClass: "err", formData }));
-    } catch (e) {
-      return res.send(renderCouriersPage({ couriers: [], baseUrl: apiBase, status: "Perusahaan, nama kurir dan plat wajib diisi.", statusClass: "err", formData }));
-    }
-  }
-
-  try {
-    await axios.post(apiBase + "/api/couriers", { company, name, plate }, { headers: { "Content-Type": "application/json" } });
-
-    const couriers = await fetchCouriers(apiBase);
-    return res.send(renderCouriersPage({ couriers, baseUrl: apiBase, status: "Kurir berhasil ditambahkan.", statusClass: "ok" }));
-  } catch (err) {
-    console.error("add courier error:", err.response?.data || err.message);
-    let msg = err.response?.data?.error || err.response?.data?.message || err.message || "Unknown error";
-    try {
-      const couriers = await fetchCouriers(apiBase);
-      return res.send(renderCouriersPage({ couriers, baseUrl: apiBase, status: "Gagal menambah kurir: " + msg, statusClass: "err", formData }));
-    } catch (e) {
-      return res.send(renderCouriersPage({ couriers: [], baseUrl: apiBase, status: "Gagal menambah kurir: " + msg, statusClass: "err", formData }));
-    }
-  }
-});
-
-// POST: validasi resi + kirim ke /api/shipments
-app.post("/", async (req, res) => {
-  const {
-    lockerId,
-    courierId,
-    courierType,
-    courierPlate,
-    receiverName,
-    receiverPhone,
-    customerId,
-    itemType,
-    resiList,
-  } = req.body;
-
-  const apiBase = normalizeBaseUrl(API_BASE_DEFAULT);
-
-  const formData = {
-    lockerId,
-    courierId,
-    courierType,
-    courierPlate,
-    receiverName,
-    receiverPhone,
-    customerId,
-    itemType,
-    resiList,
-  };
-
-  const summary = {
-    lockerId,
-    courierId,
-    courierType,
-    courierPlate,
-    receiverName,
-    receiverPhone,
-    customerId,
-    itemType,
-    resiArray: [],
-  };
-
-  // Load couriers for re-rendering the form
-  let couriers = [];
-  try {
-    couriers = await fetchCouriers(apiBase);
-  } catch (e) {
-    console.error("fetch couriers error:", e.message);
-  }
-
-  // VALIDASI BARU: hanya lockerId + courierType + resiList wajib
-  if (!lockerId || !courierType || !resiList) {
-    return res.send(
-      renderFormPage({
-        baseUrl: apiBase,
-        formData,
-        status: "Locker ID, jenis kurir, dan daftar resi wajib diisi.",
-        statusClass: "err",
-        responseJson: "",
-        validation: [],
-        summary: null,
-        couriers,
+        return `
+          <tr>
+            <td>${c.courierId}</td>
+            <td>${c.company.toUpperCase()}</td>
+            <td>${c.name}</td>
+            <td>${c.plate}</td>
+            <td><span class="badge ${badgeClass}">${badgeText}</span></td>
+            <td class="text-right">
+              <a class="btn btn-ghost" href="/couriers/set-state/${c.courierId}/active">Set Active</a>
+              <a class="btn btn-ghost" href="/couriers/set-state/${c.courierId}/inactive">Set Inactive</a>
+              <a class="btn btn-danger" href="/couriers/delete/${
+                c.courierId
+              }" onclick="return confirm('Hapus kurir ini?')">Hapus</a>
+            </td>
+          </tr>
+        `;
       })
-    );
+      .join("");
+
+    const body = `
+      <h1>Daftar Kurir</h1>
+      <div class="subtitle">
+        Backend: <code>${apiBase}</code>
+      </div>
+
+      <form method="POST" action="/couriers/new" class="mb-2">
+        <div class="form-row">
+          <div class="form-col">
+            <label>Nama Kurir</label>
+            <input type="text" name="name" required />
+          </div>
+          <div class="form-col">
+            <label>Perusahaan (company)</label>
+            <select id="courierCompany" name="company" class="form-control">
+  <option value="">-- Pilih Perusahaan --</option>
+  <option value="anteraja">AnterAja</option>
+  <option value="jne">JNE</option>
+  <option value="jnt">J&T</option>
+  <option value="ninja">Ninja</option>
+  <option value="sicepat">SiCepat</option>
+  <option value="pos">POS Indonesia</option>
+</select>
+
+          </div>
+          <div class="form-col">
+            <label>Plat Kendaraan</label>
+            <input type="text" name="plate" placeholder="B 1234 CD" required />
+          </div>
+        </div>
+        <div class="text-right mt-2">
+          <button class="btn btn-primary" type="submit">Tambah Kurir</button>
+        </div>
+      </form>
+
+      <table class="mt-3">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Perusahaan</th>
+            <th>Nama</th>
+            <th>Plat</th>
+            <th>Status</th>
+            <th class="text-right">Aksi</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || `<tr><td colspan="6" class="text-center">Belum ada kurir.</td></tr>`}
+        </tbody>
+      </table>
+    `;
+
+    res.send(layout("Daftar Kurir", "couriers", body));
+  } catch (err) {
+    console.error("GET /couriers view error:", err.response?.data || err.message);
+    res
+      .status(500)
+      .send(layout("Daftar Kurir", "couriers", "<h1>Error load kurir</h1>"));
   }
+});
 
-  const resiArray = resiList
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-
-  summary.resiArray = resiArray;
-
-  if (resiArray.length === 0) {
-    return res.send(
-      renderFormPage({
-        baseUrl: apiBase,
-        formData,
-        status: "Minimal satu nomor resi harus diisi.",
-        statusClass: "err",
-        responseJson: "",
-        validation: [],
-        summary,
-        couriers,
-      })
-    );
-  }
-
-  // VALIDASI KE BACKEND
-  const validationResults = [];
-  let hasInvalid = false;
-
-  for (const r of resiArray) {
-    try {
-      // gunakan courierType murni dari input Jenis Kurir. Jika tidak tersedia,
-      // fallback ke courierId (pilihan pool) — tapi prioritas: courierType.
-      const courierParam = courierType || courierId || "";
-      const vresp = await axios.get(apiBase + "/api/validate-resi", {
-        params: { courier: courierParam, resi: r },
-      });
-
-      const { valid, error } = vresp.data;
-      if (!valid) hasInvalid = true;
-
-      validationResults.push({
-        resi: r,
-        valid: !!valid,
-        message: error || (valid ? "OK" : ""),
-      });
-    } catch (e) {
-      console.error("validate-resi error:", e.message);
-      hasInvalid = true;
-      validationResults.push({
-        resi: r,
-        valid: false,
-        message: "Gagal validasi (error koneksi server)",
-      });
-    }
-  }
-
-  if (hasInvalid) {
-    return res.send(
-      renderFormPage({
-        baseUrl: apiBase,
-        formData,
-        status:
-          "Beberapa nomor resi tidak valid. Periksa tabel hasil validasi di bawah.",
-        statusClass: "err",
-        responseJson: "",
-        validation: validationResults,
-        summary,
-        couriers,
-      })
-    );
-  }
-
-  // SEMUA VALID → kirim ke /api/shipments
-  // BODY ke backend: kirim courierType sebagai sumber utama informasi kurir.
-  const body = {
-    lockerId,
-    courierType,
-    resiList: resiArray,
-  };
-
-  // tetap sertakan field opsional bila tersedia
-  if (receiverName) body.receiverName = receiverName;
-  if (receiverPhone) body.receiverPhone = receiverPhone;
-  if (customerId) body.customerId = customerId;
-  if (itemType) body.itemType = itemType;
-
-  // bila user memilih dari pool (courierId) atau mengisi plat, sertakan juga
-  if (courierId) body.courierId = courierId;
-  if (courierPlate) body.courierPlate = courierPlate;
-
+app.post("/couriers/new", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
   try {
-    const resp = await axios.post(apiBase + "/api/shipments", body, {
-      headers: { "Content-Type": "application/json" },
+    await axios.post(apiBase + "/api/couriers", {
+      name: req.body.name,
+      company: req.body.company,
+      plate: req.body.plate,
     });
-
-    return res.send(
-      renderFormPage({
-        baseUrl: apiBase,
-        formData,
-        status: "Semua resi valid & berhasil dikirim ke server.",
-        statusClass: "ok",
-        responseJson: JSON.stringify(resp.data, null, 2),
-        validation: validationResults,
-        summary,
-        couriers,
-      })
-    );
   } catch (err) {
-    console.error("Agent submit error:", err.response?.data || err.message);
-    const msg =
-      err.response?.data?.error ||
-      err.response?.data?.message ||
-      err.message ||
-      "Unknown error";
-
-    return res.send(
-      renderFormPage({
-        baseUrl: apiBase,
-        formData,
-        status: "Gagal mengirim data ke server: " + msg,
-        statusClass: "err",
-        responseJson: JSON.stringify(err.response?.data || {}, null, 2),
-        validation: validationResults,
-        summary,
-        couriers,
-      })
-    );
+    console.error("POST /couriers/new error:", err.response?.data || err.message);
   }
+  res.redirect("/couriers");
 });
 
-// GET: daftar shipments
-app.get("/list", async (req, res) => {
-  const apiBase = normalizeBaseUrl(API_BASE_DEFAULT);
-
+app.get("/couriers/set-state/:courierId/:state", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
   try {
-    const resp = await axios.get(apiBase + "/api/shipments?limit=200");
-    const shipments = resp.data?.data || [];
-
-    res.send(renderListPage(shipments, apiBase));
+    await axios.put(apiBase + "/api/couriers/" + req.params.courierId + "/status", {
+      state: req.params.state,
+    });
   } catch (err) {
-    console.error("fetch list error:", err.response?.data || err.message);
-    res.send(
-      renderListPage([], apiBase) +
-        "<!-- Gagal mengambil data shipments dari backend -->"
-    );
+    console.error("SET courier state error:", err.response?.data || err.message);
+  }
+  res.redirect("/couriers");
+});
+
+app.get("/couriers/delete/:courierId", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  try {
+    await axios.delete(apiBase + "/api/couriers/" + req.params.courierId);
+  } catch (err) {
+    console.error("DELETE courier error:", err.response?.data || err.message);
+  }
+  res.redirect("/couriers");
+});
+
+// ---------- Daftar Locker (Client Pool) ----------
+app.get("/lockers", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  try {
+    console.log(`Fetching lockers from: ${apiBase}/api/lockers`);
+    const resp = await axios.get(apiBase + "/api/lockers");
+    console.log(`Response status: ${resp.status}`);
+    console.log(`Response data:`, JSON.stringify(resp.data, null, 2));
+    
+    // Backend returns array directly, not wrapped in { data: [...] }
+    const list = Array.isArray(resp.data) ? resp.data : (resp.data?.data || []);
+    console.log(`Found ${list.length} lockers`);
+
+    const rows = list
+      .map((l) => {
+        let statusBadge = `<span class="badge badge-unknown">UNKNOWN</span>`;
+        if (l.status === "online")
+          statusBadge = `<span class="badge badge-online">ONLINE</span>`;
+        if (l.status === "offline")
+          statusBadge = `<span class="badge badge-offline">OFFLINE</span>`;
+
+        const hb = l.lastHeartbeat
+          ? new Date(l.lastHeartbeat).toLocaleString("id-ID")
+          : "-";
+        
+        const pendingCount = Array.isArray(l.pendingResi) ? l.pendingResi.length : 0;
+
+        return `
+          <tr>
+            <td>${l.lockerId}</td>
+            <td><span class="pill">${l.lockerToken || "-"}</span></td>
+            <td>${pendingCount}</td>
+            <td>${statusBadge}</td>
+            <td>${hb}</td>
+            <td class="text-right">
+              <a class="btn btn-ghost" href="${apiBase}/api/debug/locker/${encodeURIComponent(
+          l.lockerId
+        )}" target="_blank">Debug</a>
+              <a class="btn btn-danger" href="/lockers/delete/${
+                l.lockerId
+              }" onclick="return confirm('Hapus locker ini dari DB?')">Hapus</a>
+            </td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const body = `
+      <h1>Locker Client Pool</h1>
+      <div class="subtitle">
+        Daftar semua locker (ESP32) yang pernah berinteraksi dengan server.<br/>
+        Backend: <code>${apiBase}</code><br/>
+        Status <span class="badge badge-online">ONLINE</span> berarti ESP32 masih rutin memanggil <code>/api/locker/:id/token</code> (heartbeat).
+      </div>
+
+      ${list.length === 0 ? `
+      <div style="background:#fef3c7; border:1px solid #fbbf24; padding:16px; border-radius:8px; margin-bottom:20px;">
+        <h3 style="margin:0 0 8px 0; color:#92400e;">⚠️ Debug Info - No Lockers Found</h3>
+        <p style="margin:0; color:#78350f; font-size:13px;">
+          Backend returned empty data. Check console logs or visit 
+          <a href="/debug/lockers" style="color:#92400e; text-decoration:underline;">debug endpoint</a>
+          to see raw response.
+        </p>
+      </div>
+      ` : ''}
+
+      <table>
+        <thead>
+          <tr>
+            <th>Locker ID</th>
+            <th>Token</th>
+            <th>Pending Resi</th>
+            <th>Status</th>
+            <th>Last Heartbeat</th>
+            <th class="text-right">Aksi</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || `<tr><td colspan="6" class="text-center">Belum ada locker.</td></tr>`}
+        </tbody>
+      </table>
+    `;
+
+    res.send(layout("Daftar Locker", "lockers", body));
+  } catch (err) {
+    console.error("GET /lockers view error:", err.response?.data || err.message);
+    const errorMsg = err.response?.data || err.message || "Unknown error";
+    const body = `
+      <h1>Error Load Locker</h1>
+      <div style="background:#fee2e2; border:1px solid #ef4444; padding:16px; border-radius:8px; margin-top:20px;">
+        <h3 style="margin:0 0 8px 0; color:#991b1b;">❌ Connection Error</h3>
+        <p style="margin:0; color:#7f1d1d; font-size:13px;">
+          <strong>Cannot connect to backend:</strong><br/>
+          <code style="background:#ffffff; padding:4px 8px; border-radius:4px; display:inline-block; margin-top:8px;">
+            ${apiBase}/api/lockers
+          </code>
+        </p>
+        <pre style="background:#ffffff; padding:12px; border-radius:4px; margin-top:12px; overflow:auto; font-size:12px;">
+${JSON.stringify(errorMsg, null, 2)}
+        </pre>
+        <p style="margin:12px 0 0 0; color:#7f1d1d; font-size:13px;">
+          Make sure your backend server is running on <code>${apiBase}</code>
+        </p>
+      </div>
+    `;
+    res.status(500).send(layout("Daftar Locker", "lockers", body));
   }
 });
 
+// Debug endpoint to see raw backend response
+app.get("/debug/lockers", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  try {
+    const resp = await axios.get(apiBase + "/api/lockers");
+    res.json({
+      ok: true,
+      status: resp.status,
+      data: resp.data
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message,
+      response: err.response?.data
+    });
+  }
+});
+
+app.get("/lockers/delete/:lockerId", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  try {
+    await axios.delete(apiBase + "/api/lockers/" + req.params.lockerId);
+  } catch (err) {
+    console.error("DELETE locker error:", err.response?.data || err.message);
+  }
+  res.redirect("/lockers");
+});
+
+// ---------- Resi Manual User ----------
+app.get("/manual-resi", async (req, res) => {
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  try {
+    const resp = await axios.get(apiBase + "/api/manual-resi");
+    const list = resp.data?. data || [];
+
+    const rows = list
+      .map((r) => {
+        return `
+          <tr>
+            <td>${r.resi}</td>
+            <td>${r.customerId || "-"}</td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const body = `
+      <h1>Resi Manual dari User</h1>
+      <div class="subtitle">
+        Data ini berasal dari customer app (Flutter) yang menginput nomor resi manual.<br/>
+        Backend: <code>${apiBase}</code>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Resi</th>
+            <th>Customer ID</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows || `<tr><td colspan="2" class="text-center">Belum ada input resi manual.</td></tr>`}
+        </tbody>
+      </table>
+    `;
+
+    res.send(layout("Resi Manual User", "manual", body));
+  } catch (err) {
+    console.error("GET /manual-resi view error:", err.response?.data || err.message);
+    res
+      .status(500)
+      .send(layout("Resi Manual User", "manual", "<h1>Error load data</h1>"));
+  }
+});
+// ====================== START SERVER =======================
+const PORT = process.env.AGENT_PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`Agent App running at http://localhost:${PORT}`);
-  console.log(`Backend API base default: ${API_BASE_DEFAULT}`);
+  console.log(`Smart Locker – Agent app running at http://localhost:${PORT}`);
+  console.log(`Backend API base: ${normalizeBaseUrl(API_BASE_DEFAULT)}`);
 });
