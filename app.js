@@ -13,6 +13,49 @@ const API_BASE_DEFAULT =
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// === HELPER FUNCTIONS ===
+
+function renderStatusBadge(status) {
+  const badges = {
+    online: '<span class="badge badge-online">🟢 ONLINE</span>',
+    offline: '<span class="badge badge-offline">🔴 OFFLINE</span>',
+    active: '<span class="badge badge-active">ACTIVE</span>',
+    inactive: '<span class="badge badge-inactive">INACTIVE</span>',
+    ongoing: '<span class="badge badge-inactive">ONGOING</span>',
+  };
+  return badges[status] || '<span class="badge badge-unknown">UNKNOWN</span>';
+}
+
+function formatTimestamp(dateStr) {
+  if (!dateStr) return '-';
+  return new Date(dateStr).toLocaleString("id-ID");
+}
+
+function errorPage(title, message, details = null) {
+  return layout(title, '', `
+    <div style="text-align: center; padding: 40px;">
+      <div style="font-size: 48px;">⚠️</div>
+      <h1>${title}</h1>
+      <p style="color: #6b7280;">${message}</p>
+      ${details ? `<details><summary>Details</summary><pre>${details}</pre></details>` : ''}
+      <a href="/" class="btn btn-primary">Kembali</a>
+    </div>
+  `);
+}
+
+function getPendingItems(locker) {
+  const items = locker.pendingShipments || locker.pendingResi || [];
+  return items.filter(p => typeof p === 'object' ? p.status === 'pending' : true);
+}
+
+function sortByDateDesc(items, dateField) {
+  return [...items].sort((a, b) => {
+    const dateA = a[dateField] ? new Date(a[dateField]).getTime() : 0;
+    const dateB = b[dateField] ? new Date(b[dateField]).getTime() : 0;
+    return dateB - dateA;
+  });
+}
+
 function normalizeBaseUrl(url) {
   if (!url) return "";
   return url.replace(/\/+$/, "");
@@ -155,6 +198,81 @@ function layout(pageTitle, activeTab, bodyHtml) {
       background:#f3f4f6;
       font-size:11px;
     }
+
+    /* Info Grid for Locker Details */
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin: 20px 0;
+    }
+    .info-item {
+      background: #f9fafb;
+      padding: 12px 16px;
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+    }
+    .info-item label {
+      display: block;
+      font-size: 11px;
+      color: #6b7280;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* Token Display */
+    .token-display {
+      background: #fef3c7;
+      color: #92400e;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: monospace;
+    }
+
+    /* Cards Container */
+    .cards-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+      margin: 20px 0;
+    }
+
+    .card {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      transition: box-shadow 0.2s;
+    }
+    .card:hover {
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+
+    .history-card {
+      border-left: 4px solid #2563eb;
+    }
+
+    /* Search Box */
+    .search-box {
+      margin: 16px 0;
+      padding: 10px 14px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 14px;
+      width: 100%;
+      max-width: 400px;
+    }
+    .search-box:focus {
+      outline: none;
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+
+    /* Hover effects */
+    tbody tr:hover {
+      background-color: #f0f9ff !important;
+    }
   </style>
 </head>
 <body>
@@ -171,6 +289,17 @@ function layout(pageTitle, activeTab, bodyHtml) {
   <div class="container">
     ${bodyHtml}
   </div>
+  <script>
+    function filterTable(tableId, query) {
+      const table = document.getElementById(tableId);
+      if (!table) return;
+      const rows = table.querySelectorAll('tbody tr');
+      rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        row.style.display = text.includes(query.toLowerCase()) ? '' : 'none';
+      });
+    }
+  </script>
 </body>
 </html>`;
 }
@@ -552,32 +681,23 @@ app.get("/lockers", async (req, res) => {
 
     const rows = list
       .map((l) => {
-        let statusBadge = `<span class="badge badge-unknown">UNKNOWN</span>`;
-        if (l.status === "online")
-          statusBadge = `<span class="badge badge-online">ONLINE</span>`;
-        if (l.status === "offline")
-          statusBadge = `<span class="badge badge-offline">OFFLINE</span>`;
-
-        const hb = l.lastHeartbeat
-          ? new Date(l.lastHeartbeat).toLocaleString("id-ID")
-          : "-";
-        
+        const statusBadge = renderStatusBadge(l.status);
+        const hb = formatTimestamp(l.lastHeartbeat);
         const pendingCount = Array.isArray(l.pendingResi) ? l.pendingResi.length : 0;
+        const deliveryCount = (l.courierHistory || []).length;
 
         return `
           <tr>
             <td>${l.lockerId}</td>
             <td><span class="pill">${l.lockerToken || "-"}</span></td>
             <td>${pendingCount}</td>
+            <td><strong>${deliveryCount}</strong></td>
             <td>${statusBadge}</td>
             <td>${hb}</td>
             <td class="text-right">
-              <a class="btn btn-ghost" href="${apiBase}/api/debug/locker/${encodeURIComponent(
-          l.lockerId
-        )}" target="_blank">Debug</a>
-              <a class="btn btn-danger" href="/lockers/delete/${
-                l.lockerId
-              }" onclick="return confirm('Hapus locker ini dari DB?')">Hapus</a>
+              <a class="btn btn-primary" href="/lockers/${encodeURIComponent(l.lockerId)}/detail">📊 View History</a>
+              <a class="btn btn-ghost" href="${apiBase}/api/debug/locker/${encodeURIComponent(l.lockerId)}" target="_blank">Debug</a>
+              <a class="btn btn-danger" href="/lockers/delete/${l.lockerId}" onclick="return confirm('Hapus locker ini dari DB?')">Hapus</a>
             </td>
           </tr>
         `;
@@ -589,7 +709,7 @@ app.get("/lockers", async (req, res) => {
       <div class="subtitle">
         Daftar semua locker (ESP32) yang pernah berinteraksi dengan server.<br/>
         Backend: <code>${apiBase}</code><br/>
-        Status <span class="badge badge-online">ONLINE</span> berarti ESP32 masih rutin memanggil <code>/api/locker/:id/token</code> (heartbeat).
+        Status <span class="badge badge-online">🟢 ONLINE</span> berarti ESP32 masih rutin memanggil <code>/api/locker/:id/token</code> (heartbeat).
       </div>
 
       ${list.length === 0 ? `
@@ -603,19 +723,27 @@ app.get("/lockers", async (req, res) => {
       </div>
       ` : ''}
 
-      <table>
+      <input 
+        type="text" 
+        class="search-box" 
+        placeholder="🔍 Cari locker..."
+        onkeyup="filterTable('lockersTable', this.value)"
+      />
+
+      <table id="lockersTable">
         <thead>
           <tr>
             <th>Locker ID</th>
             <th>Token</th>
             <th>Pending Resi</th>
+            <th>Deliveries</th>
             <th>Status</th>
             <th>Last Heartbeat</th>
             <th class="text-right">Aksi</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="6" class="text-center">Belum ada locker.</td></tr>`}
+          ${rows || `<tr><td colspan="7" class="text-center">Belum ada locker.</td></tr>`}
         </tbody>
       </table>
     `;
@@ -643,6 +771,112 @@ ${JSON.stringify(errorMsg, null, 2)}
       </div>
     `;
     res.status(500).send(layout("Daftar Locker", "lockers", body));
+  }
+});
+
+// ---------- Locker Detail Page ----------
+app.get("/lockers/:lockerId/detail", async (req, res) => {
+  const { lockerId } = req.params;
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  
+  try {
+    const resp = await axios.get(`${apiBase}/api/lockers/${lockerId}`);
+    const locker = resp.data?.data || resp.data;
+    
+    if (!locker) {
+      return res.status(404).send(errorPage("Not Found", `Locker ${lockerId} tidak ditemukan`));
+    }
+    
+    // Info Grid
+    const statusBadge = renderStatusBadge(locker.status);
+    const lastHb = formatTimestamp(locker.lastHeartbeat);
+    const tokenUpdated = formatTimestamp(locker.tokenUpdatedAt);
+    const pendingItems = getPendingItems(locker);
+    const pendingCount = pendingItems.length;
+    const deliveryCount = (locker.courierHistory || []).length;
+    
+    // Pending Shipments Cards
+    const pendingHtml = pendingItems
+      .map(p => {
+        if (typeof p === 'string') {
+          return `
+            <div class="card">
+              <div><strong>Resi:</strong> ${p}</div>
+              <div><strong>Status:</strong> <span class="pill">pending</span></div>
+            </div>
+          `;
+        }
+        return `
+          <div class="card">
+            <div><strong>Resi:</strong> ${p.resi || '-'}</div>
+            <div><strong>Customer:</strong> ${p.customerId || '-'}</div>
+            <div><strong>Token:</strong> <code class="token-display">${p.token || '-'}</code></div>
+            <div><strong>Status:</strong> <span class="pill">${p.status || '-'}</span></div>
+          </div>
+        `;
+      }).join('') || '<p class="muted">Tidak ada pending shipments</p>';
+    
+    // Courier History Cards
+    const sortedHistory = sortByDateDesc(locker.courierHistory || [], 'deliveredAt');
+    const historyHtml = sortedHistory
+      .map(h => `
+        <div class="card history-card">
+          <div style="font-size:15px; font-weight:600; margin-bottom:8px; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">
+            🚚 ${h.courierName || '-'} (${h.courierId || '-'})
+          </div>
+          <div><span class="muted">Plat:</span> ${h.courierPlate || '-'}</div>
+          <div><span class="muted">Resi:</span> ${h.resi || '-'}</div>
+          <div><span class="muted">Customer ID:</span> ${h.customerId || '-'}</div>
+          <div><span class="muted">Token:</span> <code class="token-display">${h.usedToken || '-'}</code></div>
+          <div><span class="muted">Delivered:</span> ${formatTimestamp(h.deliveredAt)}</div>
+        </div>
+      `).join('') || '<p class="muted">Belum ada delivery history</p>';
+    
+    const body = `
+      <div style="margin-bottom: 20px;">
+        <a href="/lockers" class="btn btn-secondary">← Kembali</a>
+      </div>
+      
+      <h1>Detail Locker: ${locker.lockerId}</h1>
+      
+      <div class="info-grid">
+        <div class="info-item">
+          <label>Current Token</label>
+          <div><code class="token-display">${locker.lockerToken || '-'}</code></div>
+        </div>
+        <div class="info-item">
+          <label>Status</label>
+          <div>${statusBadge}</div>
+        </div>
+        <div class="info-item">
+          <label>Last Heartbeat</label>
+          <div>${lastHb}</div>
+        </div>
+        <div class="info-item">
+          <label>Token Rotated</label>
+          <div>${tokenUpdated}</div>
+        </div>
+        <div class="info-item">
+          <label>Pending</label>
+          <div><strong>${pendingCount}</strong></div>
+        </div>
+        <div class="info-item">
+          <label>Deliveries</label>
+          <div><strong>${deliveryCount}</strong></div>
+        </div>
+      </div>
+      
+      <h2 style="margin-top:30px;">📦 Pending Shipments</h2>
+      <div class="cards-container">${pendingHtml}</div>
+      
+      <h2 style="margin-top:30px;">🚚 Courier Delivery History</h2>
+      <div class="cards-container">${historyHtml}</div>
+    `;
+    
+    res.send(layout(`Detail ${lockerId}`, "lockers", body));
+  } catch (err) {
+    console.error("GET /lockers/:lockerId/detail error:", err.response?.data || err.message);
+    res.status(500).send(errorPage("Error", "Gagal load detail locker", JSON.stringify(err.response?.data || err.message, null, 2)));
   }
 });
 
