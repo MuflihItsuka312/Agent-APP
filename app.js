@@ -13,6 +13,49 @@ const API_BASE_DEFAULT =
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// === HELPER FUNCTIONS ===
+
+function renderStatusBadge(status) {
+  const badges = {
+    online: '<span class="badge badge-online">🟢 ONLINE</span>',
+    offline: '<span class="badge badge-offline">🔴 OFFLINE</span>',
+    active: '<span class="badge badge-active">ACTIVE</span>',
+    inactive: '<span class="badge badge-inactive">INACTIVE</span>',
+    ongoing: '<span class="badge badge-inactive">ONGOING</span>',
+  };
+  return badges[status] || '<span class="badge badge-unknown">UNKNOWN</span>';
+}
+
+function formatTimestamp(dateStr) {
+  if (!dateStr) return '-';
+  return new Date(dateStr).toLocaleString("id-ID");
+}
+
+function errorPage(title, message, details = null) {
+  return layout(title, '', `
+    <div style="text-align: center; padding: 40px;">
+      <div style="font-size: 48px;">⚠️</div>
+      <h1>${title}</h1>
+      <p style="color: #6b7280;">${message}</p>
+      ${details ? `<details><summary>Details</summary><pre>${details}</pre></details>` : ''}
+      <a href="/" class="btn btn-primary">Kembali</a>
+    </div>
+  `);
+}
+
+function getPendingItems(locker) {
+  const items = locker.pendingShipments || locker.pendingResi || [];
+  return items.filter(p => typeof p === 'object' ? p.status === 'pending' : true);
+}
+
+function sortByDateDesc(items, dateField) {
+  return [...items].sort((a, b) => {
+    const dateA = a[dateField] ? new Date(a[dateField]).getTime() : 0;
+    const dateB = b[dateField] ? new Date(b[dateField]).getTime() : 0;
+    return dateB - dateA;
+  });
+}
+
 function normalizeBaseUrl(url) {
   if (!url) return "";
   return url.replace(/\/+$/, "");
@@ -82,6 +125,9 @@ function layout(pageTitle, activeTab, bodyHtml) {
     .badge-unknown { background:#e5e7eb; color:#374151; }
     .badge-active { background:#dbeafe; color:#1d4ed8; }
     .badge-inactive { background:#fef3c7; color:#92400e; }
+    .badge-ongoing { background:#fef3c7; color:#92400e; }
+    .badge-warning { background:#fef3c7; color:#92400e; margin-left:4px; }
+    .badge-danger { background:#fee2e2; color:#991b1b; margin-left:4px; }
 
     table {
       width: 100%;
@@ -155,6 +201,81 @@ function layout(pageTitle, activeTab, bodyHtml) {
       background:#f3f4f6;
       font-size:11px;
     }
+
+    /* Info Grid for Locker Details */
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin: 20px 0;
+    }
+    .info-item {
+      background: #f9fafb;
+      padding: 12px 16px;
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+    }
+    .info-item label {
+      display: block;
+      font-size: 11px;
+      color: #6b7280;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+    }
+
+    /* Token Display */
+    .token-display {
+      background: #fef3c7;
+      color: #92400e;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: monospace;
+    }
+
+    /* Cards Container */
+    .cards-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+      margin: 20px 0;
+    }
+
+    .card {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 16px;
+      transition: box-shadow 0.2s;
+    }
+    .card:hover {
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+
+    .history-card {
+      border-left: 4px solid #2563eb;
+    }
+
+    /* Search Box */
+    .search-box {
+      margin: 16px 0;
+      padding: 10px 14px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 14px;
+      width: 100%;
+      max-width: 400px;
+    }
+    .search-box:focus {
+      outline: none;
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+
+    /* Hover effects */
+    tbody tr:hover {
+      background-color: #f0f9ff !important;
+    }
   </style>
 </head>
 <body>
@@ -171,6 +292,17 @@ function layout(pageTitle, activeTab, bodyHtml) {
   <div class="container">
     ${bodyHtml}
   </div>
+  <script>
+    function filterTable(tableId, query) {
+      const table = document.getElementById(tableId);
+      if (!table) return;
+      const rows = table.querySelectorAll('tbody tr');
+      rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        row.style.display = text.includes(query.toLowerCase()) ? '' : 'none';
+      });
+    }
+  </script>
 </body>
 </html>`;
 }
@@ -180,29 +312,48 @@ function layout(pageTitle, activeTab, bodyHtml) {
 // redirect root
 app.get("/", (req, res) => res.redirect("/shipments/new"));
 
-// ---------- Input Pengiriman ----------
+// ---------- Input Pengiriman (UPDATED with REAL searchable dropdown) ----------
 app.get("/shipments/new", async (req, res) => {
   const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
 
   let courierOptionsHtml = "";
+  let customerOptionsHtml = "";
+
   try {
-    const resp = await axios.get(apiBase + "/api/couriers");
-    const list = (resp.data?.data || []).filter((c) => c.state === "active");
-    courierOptionsHtml = list
+    // Fetch couriers and customers in parallel
+    const [courierResp, customerResp] = await Promise.all([
+      axios.get(apiBase + "/api/couriers"),
+      axios.get(apiBase + "/api/customers")
+    ]);
+
+    // Build courier options (only active)
+    const courierList = (courierResp.data?.data || []).filter((c) => c.state === "active");
+    courierOptionsHtml = courierList
       .map(
         (c) =>
           `<option value="${c.courierId}">${c.company.toUpperCase()} – ${c.name} (${c.plate})</option>`
       )
       .join("");
+
+    // Build customer options
+    const customers = customerResp.data?.data || [];
+    customerOptionsHtml = customers
+      .map(c => `<option value="${c.customerId}" data-name="${c.name}" data-phone="${c.phone}">${c.customerId} - ${c.name} (${c.phone})</option>`)
+      .join("");
+
+    console.log(`[FORM] Loaded ${customers.length} customers for dropdown`);
+
   } catch (err) {
+    console.error("Error fetching form data:", err.message);
     courierOptionsHtml = "";
+    customerOptionsHtml = "";
   }
 
   const body = `
     <h1>Input Pengiriman</h1>
     <div class="subtitle">
       Backend: <code>${apiBase}</code><br/>
-      Masukkan beberapa nomor resi sekaligus untuk satu locker & satu kurir.
+      Masukkan beberapa nomor resi sekaligus untuk satu locker & satu kurir. 
     </div>
 
     <form method="POST" action="/shipments/new">
@@ -223,18 +374,39 @@ app.get("/shipments/new", async (req, res) => {
       <div class="form-row">
         <div class="form-col">
           <label>Nama Penerima</label>
-          <input type="text" name="receiverName" placeholder="Nama customer" />
+          <input type="text" id="receiverName" name="receiverName" placeholder="Nama customer" />
         </div>
         <div class="form-col">
           <label>No. HP Penerima</label>
-          <input type="text" name="receiverPhone" placeholder="08xxxxxxxxxx" />
+          <input type="text" id="receiverPhone" name="receiverPhone" placeholder="08xxxxxxxxxx" />
         </div>
       </div>
 
       <div class="form-row">
         <div class="form-col">
-          <label>Customer ID (6 digit)</label>
-          <input type="text" name="customerId" placeholder="contoh: 384912" maxlength="6" />
+          <label>Customer ID (6 digit) 
+            <span class="badge" style="background:#3b82f6; color:white; cursor:help;" title="Pilih dari riwayat atau ketik manual">💡 Combo</span>
+          </label>
+          
+          <!-- Dropdown for selecting existing customer -->
+          <select id="customerSelect" style="width:100%; padding:7px 9px; border-radius:8px; border:1px solid #d1d5db; font-size:13px; margin-bottom:8px;">
+            <option value="">-- Pilih Customer Lama atau Biarkan Kosong --</option>
+            ${customerOptionsHtml}
+          </select>
+          
+          <!-- Manual input field -->
+          <input 
+            type="text" 
+            id="customerId" 
+            name="customerId" 
+            placeholder="Atau ketik Customer ID baru (6 digit)" 
+            maxlength="6" 
+            style="font-weight: 600; width:100%;"
+          />
+          
+          <div class="muted mt-2" style="font-size: 11px;">
+            💡 Pilih dari dropdown untuk auto-fill, atau ketik ID baru di bawahnya
+          </div>
         </div>
         <div class="form-col">
           <label>Tipe Barang (opsional)</label>
@@ -249,10 +421,66 @@ app.get("/shipments/new", async (req, res) => {
       </div>
 
       <div class="mt-4 text-right">
-        <button class="btn btn-secondary" type="reset">Reset</button>
+        <button class="btn btn-secondary" type="reset" onclick="resetCustomerFields()">Reset</button>
         <button class="btn btn-primary" type="submit">Simpan & Assign ke Locker</button>
       </div>
     </form>
+
+    <script>
+      // Auto-fill when selecting from dropdown
+      const customerSelect = document.getElementById('customerSelect');
+      const customerIdInput = document.getElementById('customerId');
+      const receiverNameInput = document.getElementById('receiverName');
+      const receiverPhoneInput = document.getElementById('receiverPhone');
+      
+      customerSelect.addEventListener('change', function(e) {
+        const selectedOption = e.target.options[e.target.selectedIndex];
+        
+        if (selectedOption.value) {
+          const customerId = selectedOption.value;
+          const name = selectedOption.getAttribute('data-name');
+          const phone = selectedOption.getAttribute('data-phone');
+          
+          // Fill the inputs
+          customerIdInput.value = customerId;
+          
+          if (name && name !== 'Unknown') {
+            receiverNameInput.value = name;
+          }
+          if (phone) {
+            receiverPhoneInput.value = phone;
+          }
+          
+          // Visual feedback
+          customerIdInput.style.background = '#d1fae5';
+          receiverNameInput.style.background = '#d1fae5';
+          receiverPhoneInput.style.background = '#d1fae5';
+          
+          setTimeout(() => {
+            customerIdInput.style.background = '';
+            receiverNameInput.style.background = '';
+            receiverPhoneInput.style.background = '';
+          }, 1500);
+          
+          console.log('Customer selected:', customerId, name, phone);
+        }
+      });
+      
+      // Allow manual typing to override
+      customerIdInput.addEventListener('input', function(e) {
+        if (e.target.value) {
+          // Reset dropdown if user types manually
+          customerSelect.value = '';
+        }
+      });
+      
+      function resetCustomerFields() {
+        customerSelect.value = '';
+        customerIdInput.value = '';
+        receiverNameInput.value = '';
+        receiverPhoneInput.value = '';
+      }
+    </script>
   `;
 
   res.send(layout("Input Pengiriman", "new", body));
@@ -405,6 +633,8 @@ app.get("/couriers", async (req, res) => {
     const resp = await axios.get(apiBase + "/api/couriers");
     const list = resp.data?.data || [];
 
+    const now = new Date();
+
     const rows = list
       .map((c) => {
         let badgeClass = "badge-unknown";
@@ -414,12 +644,23 @@ app.get("/couriers", async (req, res) => {
           badgeClass = "badge-active";
           badgeText = "ACTIVE";
         } else if (c.state === "ongoing") {
-          badgeClass = "badge-inactive";
+          badgeClass = "badge-ongoing";
           badgeText = "ONGOING";
         } else if (c.state === "inactive") {
           badgeClass = "badge-inactive";
           badgeText = "INACTIVE";
         }
+
+        const lastActive = c.lastActiveAt ? new Date(c.lastActiveAt) : null;
+        const daysSinceActive = lastActive 
+          ? Math.floor((now - lastActive) / (1000 * 60 * 60 * 24))
+          : null;
+        
+        const warningBadge = daysSinceActive !== null && daysSinceActive >= 5 && daysSinceActive < 7
+          ? '<span class="badge badge-warning">⚠️ Inactive soon</span>'
+          : daysSinceActive !== null && daysSinceActive >= 7
+          ? '<span class="badge badge-danger">🗑️ Will be deleted</span>'
+          : '';
 
         return `
           <tr>
@@ -427,7 +668,9 @@ app.get("/couriers", async (req, res) => {
             <td>${c.company.toUpperCase()}</td>
             <td>${c.name}</td>
             <td>${c.plate}</td>
-            <td><span class="badge ${badgeClass}">${badgeText}</span></td>
+            <td><span class="badge ${badgeClass}">${badgeText}</span>${warningBadge}</td>
+            <td>${lastActive ? lastActive.toLocaleString("id-ID") : "-"}</td>
+            <td>${daysSinceActive !== null ? daysSinceActive + ' hari lalu' : 'Never'}</td>
             <td class="text-right">
               <a class="btn btn-ghost" href="/couriers/set-state/${c.courierId}/active">Set Active</a>
               <a class="btn btn-ghost" href="/couriers/set-state/${c.courierId}/inactive">Set Inactive</a>
@@ -483,11 +726,13 @@ app.get("/couriers", async (req, res) => {
             <th>Nama</th>
             <th>Plat</th>
             <th>Status</th>
+            <th>Last Active</th>
+            <th>Days Since Active</th>
             <th class="text-right">Aksi</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="6" class="text-center">Belum ada kurir.</td></tr>`}
+          ${rows || `<tr><td colspan="8" class="text-center">Belum ada kurir.</td></tr>`}
         </tbody>
       </table>
     `;
@@ -552,32 +797,23 @@ app.get("/lockers", async (req, res) => {
 
     const rows = list
       .map((l) => {
-        let statusBadge = `<span class="badge badge-unknown">UNKNOWN</span>`;
-        if (l.status === "online")
-          statusBadge = `<span class="badge badge-online">ONLINE</span>`;
-        if (l.status === "offline")
-          statusBadge = `<span class="badge badge-offline">OFFLINE</span>`;
-
-        const hb = l.lastHeartbeat
-          ? new Date(l.lastHeartbeat).toLocaleString("id-ID")
-          : "-";
-        
+        const statusBadge = renderStatusBadge(l.status);
+        const hb = formatTimestamp(l.lastHeartbeat);
         const pendingCount = Array.isArray(l.pendingResi) ? l.pendingResi.length : 0;
+        const deliveryCount = (l.courierHistory || []).length;
 
         return `
           <tr>
             <td>${l.lockerId}</td>
             <td><span class="pill">${l.lockerToken || "-"}</span></td>
             <td>${pendingCount}</td>
+            <td><strong>${deliveryCount}</strong></td>
             <td>${statusBadge}</td>
             <td>${hb}</td>
             <td class="text-right">
-              <a class="btn btn-ghost" href="${apiBase}/api/debug/locker/${encodeURIComponent(
-          l.lockerId
-        )}" target="_blank">Debug</a>
-              <a class="btn btn-danger" href="/lockers/delete/${
-                l.lockerId
-              }" onclick="return confirm('Hapus locker ini dari DB?')">Hapus</a>
+              <a class="btn btn-primary" href="/lockers/${encodeURIComponent(l.lockerId)}/detail">📊 View History</a>
+              <a class="btn btn-ghost" href="${apiBase}/api/debug/locker/${encodeURIComponent(l.lockerId)}" target="_blank">Debug</a>
+              <a class="btn btn-danger" href="/lockers/delete/${l.lockerId}" onclick="return confirm('Hapus locker ini dari DB?')">Hapus</a>
             </td>
           </tr>
         `;
@@ -589,7 +825,7 @@ app.get("/lockers", async (req, res) => {
       <div class="subtitle">
         Daftar semua locker (ESP32) yang pernah berinteraksi dengan server.<br/>
         Backend: <code>${apiBase}</code><br/>
-        Status <span class="badge badge-online">ONLINE</span> berarti ESP32 masih rutin memanggil <code>/api/locker/:id/token</code> (heartbeat).
+        Status <span class="badge badge-online">🟢 ONLINE</span> berarti ESP32 masih rutin memanggil <code>/api/locker/:id/token</code> (heartbeat).
       </div>
 
       ${list.length === 0 ? `
@@ -603,19 +839,27 @@ app.get("/lockers", async (req, res) => {
       </div>
       ` : ''}
 
-      <table>
+      <input 
+        type="text" 
+        class="search-box" 
+        placeholder="🔍 Cari locker..."
+        onkeyup="filterTable('lockersTable', this.value)"
+      />
+
+      <table id="lockersTable">
         <thead>
           <tr>
             <th>Locker ID</th>
             <th>Token</th>
             <th>Pending Resi</th>
+            <th>Deliveries</th>
             <th>Status</th>
             <th>Last Heartbeat</th>
             <th class="text-right">Aksi</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="6" class="text-center">Belum ada locker.</td></tr>`}
+          ${rows || `<tr><td colspan="7" class="text-center">Belum ada locker.</td></tr>`}
         </tbody>
       </table>
     `;
@@ -643,6 +887,112 @@ ${JSON.stringify(errorMsg, null, 2)}
       </div>
     `;
     res.status(500).send(layout("Daftar Locker", "lockers", body));
+  }
+});
+
+// ---------- Locker Detail Page ----------
+app.get("/lockers/:lockerId/detail", async (req, res) => {
+  const { lockerId } = req.params;
+  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
+  
+  try {
+    const resp = await axios.get(`${apiBase}/api/lockers/${lockerId}`);
+    const locker = resp.data?.data || resp.data;
+    
+    if (!locker) {
+      return res.status(404).send(errorPage("Not Found", `Locker ${lockerId} tidak ditemukan`));
+    }
+    
+    // Info Grid
+    const statusBadge = renderStatusBadge(locker.status);
+    const lastHb = formatTimestamp(locker.lastHeartbeat);
+    const tokenUpdated = formatTimestamp(locker.tokenUpdatedAt);
+    const pendingItems = getPendingItems(locker);
+    const pendingCount = pendingItems.length;
+    const deliveryCount = (locker.courierHistory || []).length;
+    
+    // Pending Shipments Cards
+    const pendingHtml = pendingItems
+      .map(p => {
+        if (typeof p === 'string') {
+          return `
+            <div class="card">
+              <div><strong>Resi:</strong> ${p}</div>
+              <div><strong>Status:</strong> <span class="pill">pending</span></div>
+            </div>
+          `;
+        }
+        return `
+          <div class="card">
+            <div><strong>Resi:</strong> ${p.resi || '-'}</div>
+            <div><strong>Customer:</strong> ${p.customerId || '-'}</div>
+            <div><strong>Token:</strong> <code class="token-display">${p.token || '-'}</code></div>
+            <div><strong>Status:</strong> <span class="pill">${p.status || '-'}</span></div>
+          </div>
+        `;
+      }).join('') || '<p class="muted">Tidak ada pending shipments</p>';
+    
+    // Courier History Cards
+    const sortedHistory = sortByDateDesc(locker.courierHistory || [], 'deliveredAt');
+    const historyHtml = sortedHistory
+      .map(h => `
+        <div class="card history-card">
+          <div style="font-size:15px; font-weight:600; margin-bottom:8px; border-bottom:2px solid #e5e7eb; padding-bottom:8px;">
+            🚚 ${h.courierName || '-'} (${h.courierId || '-'})
+          </div>
+          <div><span class="muted">Plat:</span> ${h.courierPlate || '-'}</div>
+          <div><span class="muted">Resi:</span> ${h.resi || '-'}</div>
+          <div><span class="muted">Customer ID:</span> ${h.customerId || '-'}</div>
+          <div><span class="muted">Token:</span> <code class="token-display">${h.usedToken || '-'}</code></div>
+          <div><span class="muted">Delivered:</span> ${formatTimestamp(h.deliveredAt)}</div>
+        </div>
+      `).join('') || '<p class="muted">Belum ada delivery history</p>';
+    
+    const body = `
+      <div style="margin-bottom: 20px;">
+        <a href="/lockers" class="btn btn-secondary">← Kembali</a>
+      </div>
+      
+      <h1>Detail Locker: ${locker.lockerId}</h1>
+      
+      <div class="info-grid">
+        <div class="info-item">
+          <label>Current Token</label>
+          <div><code class="token-display">${locker.lockerToken || '-'}</code></div>
+        </div>
+        <div class="info-item">
+          <label>Status</label>
+          <div>${statusBadge}</div>
+        </div>
+        <div class="info-item">
+          <label>Last Heartbeat</label>
+          <div>${lastHb}</div>
+        </div>
+        <div class="info-item">
+          <label>Token Rotated</label>
+          <div>${tokenUpdated}</div>
+        </div>
+        <div class="info-item">
+          <label>Pending</label>
+          <div><strong>${pendingCount}</strong></div>
+        </div>
+        <div class="info-item">
+          <label>Deliveries</label>
+          <div><strong>${deliveryCount}</strong></div>
+        </div>
+      </div>
+      
+      <h2 style="margin-top:30px;">📦 Pending Shipments</h2>
+      <div class="cards-container">${pendingHtml}</div>
+      
+      <h2 style="margin-top:30px;">🚚 Courier Delivery History</h2>
+      <div class="cards-container">${historyHtml}</div>
+    `;
+    
+    res.send(layout(`Detail ${lockerId}`, "lockers", body));
+  } catch (err) {
+    console.error("GET /lockers/:lockerId/detail error:", err.response?.data || err.message);
+    res.status(500).send(errorPage("Error", "Gagal load detail locker", JSON.stringify(err.response?.data || err.message, null, 2)));
   }
 });
 
