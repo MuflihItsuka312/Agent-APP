@@ -8,7 +8,7 @@ const app = express();
 // === CONFIG BACKEND ===
 // contoh: SMARTLOCKER_API_BASE=http://127.0.0.1:3000
 const API_BASE_DEFAULT =
-  process.env.SMARTLOCKER_API_BASE || "http://127.0.0.1:3000";
+  process.env.SMARTLOCKER_API_BASE || "http://192.168.0.100:3000";
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -312,18 +312,23 @@ function layout(pageTitle, activeTab, bodyHtml) {
 // redirect root
 app.get("/", (req, res) => res.redirect("/shipments/new"));
 
-// ---------- Input Pengiriman (UPDATED with REAL searchable dropdown) ----------
+// ---------- Input Pengiriman (UPDATED with searchable dropdowns) ----------
 app.get("/shipments/new", async (req, res) => {
   const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
 
   let courierOptionsHtml = "";
   let customerOptionsHtml = "";
+  let lockerDropdownHtml = "";
+  let customerDropdownHtml = "";
+  let customers = [];
+  let activeLockers = [];
 
   try {
-    // Fetch couriers and customers in parallel
-    const [courierResp, customerResp] = await Promise.all([
+    // Fetch couriers, customers, and lockers in parallel
+    const [courierResp, customerResp, lockerResp] = await Promise.all([
       axios.get(apiBase + "/api/couriers"),
-      axios.get(apiBase + "/api/customers")
+      axios.get(apiBase + "/api/customers"),
+      axios.get(apiBase + "/api/lockers")
     ]);
 
     // Build courier options (only active)
@@ -335,33 +340,88 @@ app.get("/shipments/new", async (req, res) => {
       )
       .join("");
 
-    // Build customer options
-    const customers = customerResp.data?.data || [];
-    customerOptionsHtml = customers
-      .map(c => `<option value="${c.customerId}" data-name="${c.name}" data-phone="${c.phone}">${c.customerId} - ${c.name} (${c.phone})</option>`)
-      .join("");
+    // Get customers
+    customers = customerResp.data?.data || [];
 
-    console.log(`[FORM] Loaded ${customers.length} customers for dropdown`);
+    // Build customer dropdown items
+    customerDropdownHtml = customers
+      .map(c => `
+        <div class="dropdown-item"
+             data-value="${c.customerId}"
+             data-name="${c.name}"
+             data-phone="${c.phone}">
+          <div style="font-weight:600;">${c.customerId} - ${c.name}</div>
+          <div style="font-size:11px; color:#6b7280;">${c.phone}</div>
+        </div>
+      `)
+      .join('');
+
+    // Build locker options (ONLY ONLINE LOCKERS)
+    const lockers = Array.isArray(lockerResp.data) ? lockerResp.data : (lockerResp.data?.data || []);
+    activeLockers = lockers.filter(l => l.status === 'online');
+
+    // Build locker dropdown items
+    lockerDropdownHtml = activeLockers
+      .map(l => {
+        const pendingCount = Array.isArray(l.pendingResi) ? l.pendingResi.length : 0;
+        const lastHb = l.lastHeartbeat ? new Date(l.lastHeartbeat).toLocaleString('id-ID', {
+          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+        }) : 'Never';
+
+        return `
+          <div class="dropdown-item" data-value="${l.lockerId}">
+            <div style="font-weight:600;">${l.lockerId}</div>
+            <div style="font-size:11px; color:#6b7280;">
+              ${pendingCount} pending • Last: ${lastHb}
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    console.log(`[FORM] Loaded ${customers.length} customers, ${activeLockers.length} active lockers`);
 
   } catch (err) {
     console.error("Error fetching form data:", err.message);
     courierOptionsHtml = "";
-    customerOptionsHtml = "";
+    customerDropdownHtml = "";
+    lockerDropdownHtml = "";
   }
 
   const body = `
     <h1>Input Pengiriman</h1>
     <div class="subtitle">
       Backend: <code>${apiBase}</code><br/>
-      Masukkan beberapa nomor resi sekaligus untuk satu locker & satu kurir. 
+      Masukkan beberapa nomor resi sekaligus untuk satu locker & satu kurir.
     </div>
 
     <form method="POST" action="/shipments/new">
       <div class="form-row">
         <div class="form-col">
-          <label>Locker ID</label>
-          <input type="text" name="lockerId" placeholder="mis: locker01" required />
+          <label>Locker ID
+            <span class="badge" style="background:#10b981; color:white; cursor:help;" title="Hanya locker online">🟢 Online Only</span>
+          </label>
+
+          <!-- Searchable Dropdown -->
+          <div class="searchable-dropdown">
+            <input
+              type="text"
+              id="lockerSearch"
+              class="search-input"
+              placeholder="Ketik untuk cari locker..."
+              autocomplete="off"
+            />
+            <input type="hidden" name="lockerId" id="lockerIdValue" required />
+            <div id="lockerDropdown" class="dropdown-list" style="display:none;">
+              ${lockerDropdownHtml}
+            </div>
+          </div>
+
+          <div class="muted mt-2" style="font-size: 11px;">
+            💡 Menampilkan hanya locker yang sedang online
+          </div>
         </div>
+
         <div class="form-col">
           <label>Pilih Kurir dari Pool</label>
           <select name="courierId" required>
@@ -384,30 +444,30 @@ app.get("/shipments/new", async (req, res) => {
 
       <div class="form-row">
         <div class="form-col">
-          <label>Customer ID (6 digit) 
-            <span class="badge" style="background:#3b82f6; color:white; cursor:help;" title="Pilih dari riwayat atau ketik manual">💡 Combo</span>
+          <label>Customer ID (6 digit)
           </label>
-          
-          <!-- Dropdown for selecting existing customer -->
-          <select id="customerSelect" style="width:100%; padding:7px 9px; border-radius:8px; border:1px solid #d1d5db; font-size:13px; margin-bottom:8px;">
-            <option value="">-- Pilih Customer Lama atau Biarkan Kosong --</option>
-            ${customerOptionsHtml}
-          </select>
-          
-          <!-- Manual input field -->
-          <input 
-            type="text" 
-            id="customerId" 
-            name="customerId" 
-            placeholder="Atau ketik Customer ID baru (6 digit)" 
-            maxlength="6" 
-            style="font-weight: 600; width:100%;"
-          />
-          
+
+          <!-- Searchable Customer Dropdown -->
+          <div class="searchable-dropdown">
+            <input
+              type="text"
+              id="customerSearch"
+              class="search-input"
+              placeholder="Ketik untuk cari customer..."
+              autocomplete="off"
+              maxlength="6"
+            />
+            <input type="hidden" name="customerId" id="customerIdValue" />
+            <div id="customerDropdown" class="dropdown-list" style="display:none;">
+              ${customerDropdownHtml}
+            </div>
+          </div>
+
           <div class="muted mt-2" style="font-size: 11px;">
-            💡 Pilih dari dropdown untuk auto-fill, atau ketik ID baru di bawahnya
+            💡 Pilih dari dropdown atau ketik ID baru
           </div>
         </div>
+
         <div class="form-col">
           <label>Tipe Barang (opsional)</label>
           <input type="text" name="itemType" placeholder="Dokumen / Paket kecil / dll" />
@@ -416,69 +476,246 @@ app.get("/shipments/new", async (req, res) => {
 
       <div class="mt-3">
         <label>Daftar Nomor Resi (satu per baris)</label>
-        <textarea name="resiList" placeholder="11002899918893&#10;10008015952761" required></textarea>
-        <div class="muted mt-2">Setiap baris akan dibuat sebagai satu shipment dan dimasukkan ke pendingResi locker.</div>
+        <textarea name="resiList" id="resiList" placeholder="11002899918893&#10;10008015952761" required></textarea>
+        <div class="muted mt-2">Setiap baris akan dibuat sebagai satu shipment dan dimasukkan ke pendingResi locker. </div>
       </div>
 
       <div class="mt-4 text-right">
-        <button class="btn btn-secondary" type="reset" onclick="resetCustomerFields()">Reset</button>
+        <button class="btn btn-secondary" type="reset" onclick="resetForm()">Reset</button>
         <button class="btn btn-primary" type="submit">Simpan & Assign ke Locker</button>
       </div>
     </form>
 
+    <style>
+      .searchable-dropdown {
+        position: relative;
+      }
+
+      .search-input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        font-size: 13px;
+        transition: all 0.2s;
+      }
+
+      .search-input:focus {
+        outline: none;
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+      }
+
+      .dropdown-list {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        max-height: 300px;
+        overflow-y: auto;
+        background: white;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+        z-index: 1000;
+        margin-top: 4px;
+      }
+
+      .dropdown-item {
+        padding: 12px 16px;
+        cursor: pointer;
+        border-bottom: 1px solid #f3f4f6;
+        transition: background 0.15s;
+      }
+
+      .dropdown-item:hover {
+        background: #f0f9ff;
+      }
+
+      .dropdown-item:last-child {
+        border-bottom: none;
+      }
+
+      .dropdown-item.highlighted {
+        background: #dbeafe;
+      }
+    </style>
+
     <script>
-      // Auto-fill when selecting from dropdown
-      const customerSelect = document.getElementById('customerSelect');
-      const customerIdInput = document.getElementById('customerId');
+      // ========== LOCKER SEARCHABLE DROPDOWN ==========
+      const lockerSearch = document.getElementById('lockerSearch');
+      const lockerDropdown = document.getElementById('lockerDropdown');
+      const lockerIdValue = document.getElementById('lockerIdValue');
+
+      lockerSearch.addEventListener('focus', () => {
+        lockerDropdown.style.display = 'block';
+        filterLockers('');
+      });
+
+      lockerSearch.addEventListener('input', (e) => {
+        filterLockers(e.target.value);
+        lockerDropdown.style.display = 'block';
+      });
+
+      function filterLockers(query) {
+        const items = lockerDropdown.querySelectorAll('.dropdown-item');
+        let visibleCount = 0;
+
+        items.forEach(item => {
+          const text = item.textContent.toLowerCase();
+          if (text.includes(query.toLowerCase())) {
+            item.style.display = 'block';
+            visibleCount++;
+          } else {
+            item.style.display = 'none';
+          }
+        });
+
+        if (visibleCount === 0) {
+          lockerDropdown.innerHTML = '<div style="padding:16px; text-align:center; color:#9ca3af;">Tidak ada locker online</div>';
+        }
+      }
+
+      lockerDropdown.addEventListener('click', (e) => {
+        const item = e.target.closest('.dropdown-item');
+        if (item) {
+          const value = item.getAttribute('data-value');
+          lockerSearch.value = value;
+          lockerIdValue.value = value;
+          lockerDropdown.style.display = 'none';
+
+          // Visual feedback
+          lockerSearch.style.background = '#d1fae5';
+          setTimeout(() => {
+            lockerSearch.style.background = '';
+          }, 1000);
+        }
+      });
+
+      // ========== CUSTOMER SEARCHABLE DROPDOWN ==========
+      const customerSearch = document.getElementById('customerSearch');
+      const customerDropdown = document.getElementById('customerDropdown');
+      const customerIdValue = document.getElementById('customerIdValue');
       const receiverNameInput = document.getElementById('receiverName');
       const receiverPhoneInput = document.getElementById('receiverPhone');
-      
-      customerSelect.addEventListener('change', function(e) {
-        const selectedOption = e.target.options[e.target.selectedIndex];
-        
-        if (selectedOption.value) {
-          const customerId = selectedOption.value;
-          const name = selectedOption.getAttribute('data-name');
-          const phone = selectedOption.getAttribute('data-phone');
-          
-          // Fill the inputs
-          customerIdInput.value = customerId;
-          
+
+      customerSearch.addEventListener('focus', () => {
+        customerDropdown.style.display = 'block';
+        filterCustomers('');
+      });
+
+      customerSearch.addEventListener('input', (e) => {
+        const value = e.target.value;
+
+        // If typing manually (6 digits), use it directly
+        if (/^\d{1,6}$/.test(value)) {
+          customerIdValue.value = value;
+        }
+
+        filterCustomers(value);
+        customerDropdown.style.display = 'block';
+      });
+
+      function filterCustomers(query) {
+        const items = customerDropdown.querySelectorAll('.dropdown-item');
+        let visibleCount = 0;
+
+        items.forEach(item => {
+          const text = item.textContent.toLowerCase();
+          if (text.includes(query.toLowerCase())) {
+            item.style.display = 'block';
+            visibleCount++;
+          } else {
+            item.style.display = 'none';
+          }
+        });
+
+        if (visibleCount === 0 && query.length > 0) {
+          customerDropdown.innerHTML = '<div style="padding:16px; text-align:center; color:#9ca3af;">Customer tidak ditemukan - ketik ID baru</div>';
+        }
+      }
+
+      customerDropdown.addEventListener('click', (e) => {
+        const item = e.target.closest('.dropdown-item');
+        if (item) {
+          const customerId = item.getAttribute('data-value');
+          const name = item.getAttribute('data-name');
+          const phone = item.getAttribute('data-phone');
+
+          customerSearch.value = customerId;
+          customerIdValue.value = customerId;
+
           if (name && name !== 'Unknown') {
             receiverNameInput.value = name;
           }
           if (phone) {
             receiverPhoneInput.value = phone;
           }
-          
+
+          customerDropdown.style.display = 'none';
+
           // Visual feedback
-          customerIdInput.style.background = '#d1fae5';
+          customerSearch.style.background = '#d1fae5';
           receiverNameInput.style.background = '#d1fae5';
           receiverPhoneInput.style.background = '#d1fae5';
-          
+
           setTimeout(() => {
-            customerIdInput.style.background = '';
+            customerSearch.style.background = '';
             receiverNameInput.style.background = '';
             receiverPhoneInput.style.background = '';
-          }, 1500);
-          
-          console.log('Customer selected:', customerId, name, phone);
+          }, 1000);
         }
       });
-      
-      // Allow manual typing to override
-      customerIdInput.addEventListener('input', function(e) {
-        if (e.target.value) {
-          // Reset dropdown if user types manually
-          customerSelect.value = '';
+
+      // Close dropdowns when clicking outside
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.searchable-dropdown')) {
+          lockerDropdown.style.display = 'none';
+          customerDropdown.style.display = 'none';
         }
       });
-      
-      function resetCustomerFields() {
-        customerSelect.value = '';
-        customerIdInput.value = '';
+
+      // Keyboard navigation (up/down arrows)
+      [lockerSearch, customerSearch].forEach(input => {
+        input.addEventListener('keydown', (e) => {
+          const dropdown = input.id === 'lockerSearch' ? lockerDropdown : customerDropdown;
+          const items = Array.from(dropdown.querySelectorAll('.dropdown-item')).filter(i => i.style.display !== 'none');
+
+          if (!items.length) return;
+
+          const currentIndex = items.findIndex(i => i.classList.contains('highlighted'));
+
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            const nextIndex = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
+            items.forEach(i => i.classList.remove('highlighted'));
+            items[nextIndex].classList.add('highlighted');
+            items[nextIndex].scrollIntoView({ block: 'nearest' });
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            const prevIndex = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
+            items.forEach(i => i.classList.remove('highlighted'));
+            items[prevIndex].classList.add('highlighted');
+            items[prevIndex].scrollIntoView({ block: 'nearest' });
+          } else if (e.key === 'Enter') {
+            e.preventDefault();
+            const highlighted = items[currentIndex];
+            if (highlighted) {
+              highlighted.click();
+            }
+          }
+        });
+      });
+
+      function resetForm() {
+        lockerSearch.value = '';
+        lockerIdValue.value = '';
+        customerSearch.value = '';
+        customerIdValue.value = '';
         receiverNameInput.value = '';
         receiverPhoneInput.value = '';
+        lockerDropdown.style.display = 'none';
+        customerDropdown.style.display = 'none';
       }
     </script>
   `;
@@ -652,10 +889,10 @@ app.get("/couriers", async (req, res) => {
         }
 
         const lastActive = c.lastActiveAt ? new Date(c.lastActiveAt) : null;
-        const daysSinceActive = lastActive 
+        const daysSinceActive = lastActive
           ? Math.floor((now - lastActive) / (1000 * 60 * 60 * 24))
           : null;
-        
+
         const warningBadge = daysSinceActive !== null && daysSinceActive >= 5 && daysSinceActive < 7
           ? '<span class="badge badge-warning">⚠️ Inactive soon</span>'
           : daysSinceActive !== null && daysSinceActive >= 7
@@ -790,7 +1027,7 @@ app.get("/lockers", async (req, res) => {
     const resp = await axios.get(apiBase + "/api/lockers");
     console.log(`Response status: ${resp.status}`);
     console.log(`Response data:`, JSON.stringify(resp.data, null, 2));
-    
+
     // Backend returns array directly, not wrapped in { data: [...] }
     const list = Array.isArray(resp.data) ? resp.data : (resp.data?.data || []);
     console.log(`Found ${list.length} lockers`);
@@ -832,16 +1069,16 @@ app.get("/lockers", async (req, res) => {
       <div style="background:#fef3c7; border:1px solid #fbbf24; padding:16px; border-radius:8px; margin-bottom:20px;">
         <h3 style="margin:0 0 8px 0; color:#92400e;">⚠️ Debug Info - No Lockers Found</h3>
         <p style="margin:0; color:#78350f; font-size:13px;">
-          Backend returned empty data. Check console logs or visit 
+          Backend returned empty data. Check console logs or visit
           <a href="/debug/lockers" style="color:#92400e; text-decoration:underline;">debug endpoint</a>
           to see raw response.
         </p>
       </div>
       ` : ''}
 
-      <input 
-        type="text" 
-        class="search-box" 
+      <input
+        type="text"
+        class="search-box"
         placeholder="🔍 Cari locker..."
         onkeyup="filterTable('lockersTable', this.value)"
       />
@@ -894,15 +1131,15 @@ ${JSON.stringify(errorMsg, null, 2)}
 app.get("/lockers/:lockerId/detail", async (req, res) => {
   const { lockerId } = req.params;
   const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
-  
+
   try {
     const resp = await axios.get(`${apiBase}/api/lockers/${lockerId}`);
     const locker = resp.data?.data || resp.data;
-    
+
     if (!locker) {
       return res.status(404).send(errorPage("Not Found", `Locker ${lockerId} tidak ditemukan`));
     }
-    
+
     // Info Grid
     const statusBadge = renderStatusBadge(locker.status);
     const lastHb = formatTimestamp(locker.lastHeartbeat);
@@ -910,7 +1147,7 @@ app.get("/lockers/:lockerId/detail", async (req, res) => {
     const pendingItems = getPendingItems(locker);
     const pendingCount = pendingItems.length;
     const deliveryCount = (locker.courierHistory || []).length;
-    
+
     // Pending Shipments Cards
     const pendingHtml = pendingItems
       .map(p => {
@@ -931,7 +1168,7 @@ app.get("/lockers/:lockerId/detail", async (req, res) => {
           </div>
         `;
       }).join('') || '<p class="muted">Tidak ada pending shipments</p>';
-    
+
     // Courier History Cards
     const sortedHistory = sortByDateDesc(locker.courierHistory || [], 'deliveredAt');
     const historyHtml = sortedHistory
@@ -947,14 +1184,14 @@ app.get("/lockers/:lockerId/detail", async (req, res) => {
           <div><span class="muted">Delivered:</span> ${formatTimestamp(h.deliveredAt)}</div>
         </div>
       `).join('') || '<p class="muted">Belum ada delivery history</p>';
-    
+
     const body = `
       <div style="margin-bottom: 20px;">
         <a href="/lockers" class="btn btn-secondary">← Kembali</a>
       </div>
-      
+
       <h1>Detail Locker: ${locker.lockerId}</h1>
-      
+
       <div class="info-grid">
         <div class="info-item">
           <label>Current Token</label>
@@ -981,14 +1218,14 @@ app.get("/lockers/:lockerId/detail", async (req, res) => {
           <div><strong>${deliveryCount}</strong></div>
         </div>
       </div>
-      
+
       <h2 style="margin-top:30px;">📦 Pending Shipments</h2>
       <div class="cards-container">${pendingHtml}</div>
-      
+
       <h2 style="margin-top:30px;">🚚 Courier Delivery History</h2>
       <div class="cards-container">${historyHtml}</div>
     `;
-    
+
     res.send(layout(`Detail ${lockerId}`, "lockers", body));
   } catch (err) {
     console.error("GET /lockers/:lockerId/detail error:", err.response?.data || err.message);
