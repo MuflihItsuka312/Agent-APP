@@ -332,7 +332,13 @@ app.get("/shipments/new", async (req, res) => {
 
     // Try to fetch active resi (may not exist in backend yet)
     let activeResiPromise = axios.get(apiBase + "/api/agent/active-resi").catch(err => {
-      console.log("[FORM] Active resi endpoint not available yet:", err.message);
+      if (err.response?.status === 404) {
+        console.log("[FORM] Active resi endpoint not found (404) - feature not yet implemented in backend");
+      } else if (err.code === 'ECONNREFUSED') {
+        console.log("[FORM] Cannot connect to backend server");
+      } else {
+        console.log("[FORM] Active resi endpoint error:", err.message);
+      }
       return { data: { ok: false, data: [] } };
     });
     fetchPromises.push(activeResiPromise);
@@ -381,7 +387,9 @@ app.get("/shipments/new", async (req, res) => {
       activeResiOptionsHtml = activeResiList
         .map(r => {
           const displayLabel = r.displayLabel || `${r.resi} - ${r.courierType.toUpperCase()} - ${r.customerName}`;
-          return `<option value='${JSON.stringify(r)}'>${displayLabel}</option>`;
+          // Use data attributes for safer JSON handling
+          const jsonData = JSON.stringify(r).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+          return `<option value="${r.resi}" data-resi='${jsonData}'>${displayLabel}</option>`;
         })
         .join("");
       console.log(`[FORM] Loaded ${activeResiList.length} active resi`);
@@ -531,7 +539,13 @@ app.get("/shipments/new", async (req, res) => {
       activeResiSelect.addEventListener('change', function(e) {
         if (e.target.value) {
           try {
-            const resiData = JSON.parse(e.target.value);
+            const selectedOption = e.target.options[e.target.selectedIndex];
+            const resiDataJson = selectedOption.getAttribute('data-resi');
+            if (!resiDataJson) {
+              console.error('[Active Resi] No data-resi attribute found');
+              return;
+            }
+            const resiData = JSON.parse(resiDataJson);
             currentSelectedResi = resiData;
             
             console.log('[Active Resi] Selected:', resiData);
@@ -711,7 +725,21 @@ app.get("/shipments/new", async (req, res) => {
       customerSelect.addEventListener('change', function(e) {
         // Don't allow customer select if active resi is selected
         if (currentSelectedResi) {
-          alert('⚠️ Active resi sudah dipilih. Reset form jika ingin pilih customer manual.');
+          // Show inline message instead of alert
+          const warningDiv = document.createElement('div');
+          warningDiv.style.cssText = 'background:#fef3c7; border:1px solid #fbbf24; padding:8px 12px; border-radius:6px; margin-top:8px; color:#92400e; font-size:12px;';
+          warningDiv.textContent = '⚠️ Active resi sudah dipilih. Reset form jika ingin pilih customer manual.';
+          
+          const existingWarning = customerSelect.parentNode.querySelector('.customer-warning');
+          if (existingWarning) {
+            existingWarning.remove();
+          }
+          
+          warningDiv.className = 'customer-warning';
+          customerSelect.parentNode.appendChild(warningDiv);
+          
+          setTimeout(() => warningDiv.remove(), 3000);
+          
           e.target.value = '';
           return;
         }
@@ -757,7 +785,14 @@ app.get("/shipments/new", async (req, res) => {
       });
       
       // ========== FORM VALIDATION ==========
+      const formSubmitError = document.createElement('div');
+      formSubmitError.id = 'formSubmitError';
+      formSubmitError.style.cssText = 'display:none; background:#fee2e2; border:1px solid #ef4444; padding:12px; border-radius:8px; margin:12px 0; color:#991b1b;';
+      
       document.getElementById('shipmentForm').addEventListener('submit', function(e) {
+        // Hide any previous errors
+        formSubmitError.style.display = 'none';
+        
         // Validate courier matches resi service type if active resi was selected
         if (currentSelectedResi && courierSelect.value) {
           const selectedCourierOption = courierSelect.options[courierSelect.selectedIndex];
@@ -766,7 +801,23 @@ app.get("/shipments/new", async (req, res) => {
           
           if (courierCompany !== resiService) {
             e.preventDefault();
-            alert(\`⚠️ Tidak cocok!\\n\\nResi: \${resiService.toUpperCase()}\\nKurir: \${courierCompany.toUpperCase()}\\n\\nSilakan pilih kurir yang sesuai dengan tipe resi.\`);
+            
+            // Show inline error instead of alert
+            formSubmitError.innerHTML = \`
+              <strong>⚠️ Tidak cocok!</strong><br><br>
+              Resi: <strong>\${resiService.toUpperCase()}</strong><br>
+              Kurir: <strong>\${courierCompany.toUpperCase()}</strong><br><br>
+              Silakan pilih kurir yang sesuai dengan tipe resi.
+            \`;
+            formSubmitError.style.display = 'block';
+            
+            // Insert error message before submit buttons
+            const submitButtons = this.querySelector('.text-right');
+            submitButtons.parentNode.insertBefore(formSubmitError, submitButtons);
+            
+            // Scroll to error
+            formSubmitError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            
             return false;
           }
         }
