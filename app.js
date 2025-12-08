@@ -312,30 +312,49 @@ function layout(pageTitle, activeTab, bodyHtml) {
 // redirect root
 app.get("/", (req, res) => res.redirect("/shipments/new"));
 
-// ---------- Input Pengiriman (UPDATED with searchable dropdowns) ----------
+// ---------- Input Pengiriman (UPDATED with searchable dropdowns and active resi) ----------
 app.get("/shipments/new", async (req, res) => {
   const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
 
   let courierOptionsHtml = "";
   let customerOptionsHtml = "";
   let lockerOptionsHtml = "";
+  let activeResiOptionsHtml = "";
+  let courierListJson = "[]";
 
   try {
-    // Fetch couriers, customers, and lockers in parallel
-    const [courierResp, customerResp, lockerResp] = await Promise.all([
+    // Fetch couriers, customers, lockers, and active resi in parallel
+    const fetchPromises = [
       axios.get(apiBase + "/api/couriers"),
       axios.get(apiBase + "/api/customers"),
       axios.get(apiBase + "/api/lockers")
-    ]);
+    ];
+
+    // Try to fetch active resi (may not exist in backend yet)
+    let activeResiPromise = axios.get(apiBase + "/api/agent/active-resi").catch(err => {
+      console.log("[FORM] Active resi endpoint not available yet:", err.message);
+      return { data: { ok: false, data: [] } };
+    });
+    fetchPromises.push(activeResiPromise);
+
+    const [courierResp, customerResp, lockerResp, activeResiResp] = await Promise.all(fetchPromises);
 
     // Build courier options (only active)
     const courierList = (courierResp.data?.data || []).filter((c) => c.state === "active");
     courierOptionsHtml = courierList
       .map(
         (c) =>
-          `<option value="${c.courierId}">${c.company.toUpperCase()} – ${c.name} (${c.plate})</option>`
+          `<option value="${c.courierId}" data-company="${c.company.toLowerCase()}">${c.company.toUpperCase()} – ${c.name} (${c.plate})</option>`
       )
       .join("");
+    
+    // Store courier list as JSON for client-side filtering
+    courierListJson = JSON.stringify(courierList.map(c => ({
+      courierId: c.courierId,
+      company: c.company.toLowerCase(),
+      name: c.name,
+      plate: c.plate
+    })));
 
     // Build customer options
     const customers = customerResp.data?.data || [];
@@ -352,23 +371,52 @@ app.get("/shipments/new", async (req, res) => {
         const lastHb = l.lastHeartbeat ? new Date(l.lastHeartbeat).toLocaleString('id-ID', {
           month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
         }) : 'Never';
-        return `<option value="${l.lockerId}">${l.lockerId} (${pendingCount} pending • ${lastHb})</option>`;
+        return `<option value="${l.lockerId}" data-pending="${pendingCount}">${l.lockerId} (${pendingCount} pending • ${lastHb})</option>`;
       })
       .join("");
 
-    console.log(`[FORM] Loaded ${customers.length} customers, ${onlineLockers.length} online lockers`);
+    // Build active resi options
+    const activeResiList = activeResiResp.data?.data || [];
+    if (activeResiList.length > 0) {
+      activeResiOptionsHtml = activeResiList
+        .map(r => {
+          const displayLabel = r.displayLabel || `${r.resi} - ${r.courierType.toUpperCase()} - ${r.customerName}`;
+          return `<option value='${JSON.stringify(r)}'>${displayLabel}</option>`;
+        })
+        .join("");
+      console.log(`[FORM] Loaded ${activeResiList.length} active resi`);
+    }
+
+    console.log(`[FORM] Loaded ${customers.length} customers, ${onlineLockers.length} online lockers, ${activeResiList.length} active resi`);
 
   } catch (err) {
     console.error("Error fetching form data:", err.message);
     courierOptionsHtml = "";
     customerOptionsHtml = "";
     lockerOptionsHtml = "";
+    activeResiOptionsHtml = "";
   }
 
   const body = `
     <h1>Input Pengiriman</h1>
 
-    <form method="POST" action="/shipments/new">
+    <form method="POST" action="/shipments/new" id="shipmentForm">
+      <!-- NEW: Active Resi Selection (Primary) -->
+      <div style="background:#f0f9ff; border:2px solid #3b82f6; padding:16px; border-radius:8px; margin-bottom:20px;">
+        <label style="font-size:14px; font-weight:600; color:#1e40af; display:block; margin-bottom:8px;">
+          🎯 Pilih Resi Aktif (Belum Diantar)
+        </label>
+        <select 
+          id="activeResiSelect" 
+          style="width:100%; padding:9px 11px; border-radius:8px; border:1px solid #3b82f6; font-size:14px; background:white;">
+          <option value="">-- Pilih Resi atau Biarkan Kosong untuk Input Manual --</option>
+          ${activeResiOptionsHtml}
+        </select>
+        <div class="muted mt-2" style="font-size: 12px; color:#1e40af;">
+          💡 Memilih resi akan otomatis mengisi semua field di bawah
+        </div>
+      </div>
+
       <div class="form-row">
         <div class="form-col">
           <label>Locker ID</label>
@@ -392,13 +440,17 @@ app.get("/shipments/new", async (req, res) => {
           <div class="muted mt-2" style="font-size: 11px;">
             💡 Pilih dari dropdown (online locker) atau ketik manual ID
           </div>
+          <div id="lockerAutoSuggested" class="muted mt-2" style="font-size: 11px; color:#059669; display:none;">
+            ✨ Auto-suggested based on availability
+          </div>
         </div>
         <div class="form-col">
-          <label>Pilih Kurir dari Pool</label>
-          <select name="courierId" required>
+          <label>Pilih Kurir dari Pool <span id="courierFilterBadge" style="display:none;" class="badge badge-active"></span></label>
+          <select id="courierSelect" name="courierId" required>
             <option value="">-- Pilih Kurir --</option>
             ${courierOptionsHtml}
           </select>
+          <div id="courierFilterInfo" class="muted mt-2" style="font-size: 11px; display:none;"></div>
         </div>
       </div>
 
@@ -417,7 +469,7 @@ app.get("/shipments/new", async (req, res) => {
         <div class="form-col">
           <label>Customer ID (6 digit)</label>
           
-          <!-- Dropdown for selecting existing customer -->
+          <!-- Dropdown for selecting existing customer (now secondary) -->
           <select id="customerSelect" style="width:100%; padding:7px 9px; border-radius:8px; border:1px solid #d1d5db; font-size:13px; margin-bottom:8px;">
             <option value="">-- Pilih Customer Lama atau Biarkan Kosong --</option>
             ${customerOptionsHtml}
@@ -433,7 +485,10 @@ app.get("/shipments/new", async (req, res) => {
             style="font-weight: 600; width:100%;"
           />
           
-          <div class="muted mt-2" style="font-size: 11px;">
+          <div id="customerAutoFilled" class="muted mt-2" style="font-size: 11px; color:#059669; display:none;">
+            🔒 Auto-filled dari resi yang dipilih
+          </div>
+          <div id="customerManualInfo" class="muted mt-2" style="font-size: 11px;">
             💡 Pilih dari dropdown untuk auto-fill, atau ketik ID baru di bawahnya
           </div>
         </div>
@@ -445,20 +500,192 @@ app.get("/shipments/new", async (req, res) => {
 
       <div class="mt-3">
         <label>Daftar Nomor Resi (satu per baris)</label>
-        <textarea name="resiList" placeholder="11002899918893&#10;10008015952761" required></textarea>
+        <textarea id="resiList" name="resiList" placeholder="11002899918893&#10;10008015952761" required></textarea>
+        <div id="resiAutoFilled" class="muted mt-2" style="font-size: 11px; color:#059669; display:none;">
+          ✨ Pre-filled dengan resi yang dipilih
+        </div>
       </div>
 
       <div class="mt-4 text-right">
-        <button class="btn btn-secondary" type="reset" onclick="resetCustomerFields()">Reset</button>
+        <button class="btn btn-secondary" type="reset" onclick="resetAllFields()">Reset</button>
         <button class="btn btn-primary" type="submit">Simpan & Assign ke Locker</button>
       </div>
     </form>
 
     <script>
-      // ========== LOCKER AUTO-FILL ==========
-      const lockerSelect = document.getElementById('lockerSelect');
-      const lockerIdInput = document.getElementById('lockerId');
+      // ========== COURIER LIST DATA ==========
+      const allCouriers = ${courierListJson};
+      let currentSelectedResi = null;
       
+      // ========== ACTIVE RESI AUTO-FILL ==========
+      const activeResiSelect = document.getElementById('activeResiSelect');
+      const customerIdInput = document.getElementById('customerId');
+      const receiverNameInput = document.getElementById('receiverName');
+      const receiverPhoneInput = document.getElementById('receiverPhone');
+      const resiListTextarea = document.getElementById('resiList');
+      const lockerIdInput = document.getElementById('lockerId');
+      const courierSelect = document.getElementById('courierSelect');
+      const customerSelect = document.getElementById('customerSelect');
+      const lockerSelect = document.getElementById('lockerSelect');
+      
+      activeResiSelect.addEventListener('change', function(e) {
+        if (e.target.value) {
+          try {
+            const resiData = JSON.parse(e.target.value);
+            currentSelectedResi = resiData;
+            
+            console.log('[Active Resi] Selected:', resiData);
+            
+            // Auto-fill customer info
+            customerIdInput.value = resiData.customerId || '';
+            receiverNameInput.value = resiData.customerName || '';
+            receiverPhoneInput.value = resiData.customerPhone || '';
+            
+            // Pre-fill resi list
+            resiListTextarea.value = resiData.resi || '';
+            
+            // Show auto-filled indicators
+            document.getElementById('customerAutoFilled').style.display = 'block';
+            document.getElementById('customerManualInfo').style.display = 'none';
+            document.getElementById('resiAutoFilled').style.display = 'block';
+            
+            // Visual feedback - green highlight
+            const fieldsToHighlight = [customerIdInput, receiverNameInput, receiverPhoneInput, resiListTextarea];
+            fieldsToHighlight.forEach(field => {
+              field.style.background = '#d1fae5';
+              field.readOnly = true;
+            });
+            
+            setTimeout(() => {
+              fieldsToHighlight.forEach(field => {
+                field.style.background = '#f0f9ff'; // Keep light blue to indicate locked
+              });
+            }, 1500);
+            
+            // Reset customer dropdown since we're using active resi
+            customerSelect.value = '';
+            
+            // Filter courier pool by service type
+            filterCouriersByService(resiData.courierType);
+            
+            // Suggest available locker
+            suggestAvailableLocker();
+            
+          } catch (err) {
+            console.error('[Active Resi] Parse error:', err);
+          }
+        } else {
+          // Reset to manual mode
+          resetToManualMode();
+        }
+      });
+      
+      // ========== COURIER FILTERING BY SERVICE TYPE ==========
+      function filterCouriersByService(serviceType) {
+        const serviceLower = serviceType.toLowerCase();
+        
+        // Clear current options
+        courierSelect.innerHTML = '<option value="">-- Pilih Kurir --</option>';
+        
+        // Filter and add matching couriers
+        const matchingCouriers = allCouriers.filter(c => c.company.toLowerCase() === serviceLower);
+        
+        matchingCouriers.forEach(c => {
+          const option = document.createElement('option');
+          option.value = c.courierId;
+          option.setAttribute('data-company', c.company.toLowerCase());
+          option.textContent = \`\${c.company.toUpperCase()} – \${c.name} (\${c.plate})\`;
+          courierSelect.appendChild(option);
+        });
+        
+        // Update filter badge and info
+        const filterBadge = document.getElementById('courierFilterBadge');
+        const filterInfo = document.getElementById('courierFilterInfo');
+        
+        if (matchingCouriers.length > 0) {
+          filterBadge.textContent = \`🎯 Filtered: \${serviceType.toUpperCase()}\`;
+          filterBadge.style.display = 'inline-block';
+          filterInfo.textContent = \`Hanya menampilkan \${matchingCouriers.length} kurir \${serviceType.toUpperCase()}\`;
+          filterInfo.style.color = '#059669';
+          filterInfo.style.display = 'block';
+        } else {
+          filterBadge.style.display = 'none';
+          filterInfo.textContent = \`⚠️ Tidak ada kurir \${serviceType.toUpperCase()} yang aktif\`;
+          filterInfo.style.color = '#dc2626';
+          filterInfo.style.display = 'block';
+        }
+        
+        console.log(\`[Courier Filter] Filtered \${matchingCouriers.length} couriers for \${serviceType}\`);
+      }
+      
+      // ========== AUTO-SUGGEST LOCKER ==========
+      function suggestAvailableLocker() {
+        // Find locker with least pending
+        const lockerOptions = Array.from(lockerSelect.options).slice(1); // Skip first "-- Pilih --" option
+        
+        if (lockerOptions.length > 0) {
+          // Sort by pending count (stored in data-pending attribute)
+          const sortedLockers = lockerOptions.sort((a, b) => {
+            const pendingA = parseInt(a.getAttribute('data-pending') || '999');
+            const pendingB = parseInt(b.getAttribute('data-pending') || '999');
+            return pendingA - pendingB;
+          });
+          
+          // Select the best locker
+          const bestLocker = sortedLockers[0];
+          lockerIdInput.value = bestLocker.value;
+          lockerSelect.value = bestLocker.value;
+          
+          document.getElementById('lockerAutoSuggested').style.display = 'block';
+          
+          // Visual feedback
+          lockerIdInput.style.background = '#d1fae5';
+          setTimeout(() => {
+            lockerIdInput.style.background = '#f0f9ff';
+          }, 1500);
+          
+          console.log('[Locker] Auto-suggested:', bestLocker.value);
+        }
+      }
+      
+      // ========== RESET TO MANUAL MODE ==========
+      function resetToManualMode() {
+        currentSelectedResi = null;
+        
+        // Reset field locks
+        customerIdInput.readOnly = false;
+        receiverNameInput.readOnly = false;
+        receiverPhoneInput.readOnly = false;
+        resiListTextarea.readOnly = false;
+        
+        // Reset backgrounds
+        [customerIdInput, receiverNameInput, receiverPhoneInput, resiListTextarea].forEach(field => {
+          field.style.background = '';
+        });
+        
+        // Hide auto-fill indicators
+        document.getElementById('customerAutoFilled').style.display = 'none';
+        document.getElementById('customerManualInfo').style.display = 'block';
+        document.getElementById('resiAutoFilled').style.display = 'none';
+        document.getElementById('lockerAutoSuggested').style.display = 'none';
+        
+        // Reset courier filter
+        courierSelect.innerHTML = '<option value="">-- Pilih Kurir --</option>';
+        allCouriers.forEach(c => {
+          const option = document.createElement('option');
+          option.value = c.courierId;
+          option.setAttribute('data-company', c.company.toLowerCase());
+          option.textContent = \`\${c.company.toUpperCase()} – \${c.name} (\${c.plate})\`;
+          courierSelect.appendChild(option);
+        });
+        
+        document.getElementById('courierFilterBadge').style.display = 'none';
+        document.getElementById('courierFilterInfo').style.display = 'none';
+        
+        console.log('[Reset] Switched to manual mode');
+      }
+      
+      // ========== LOCKER AUTO-FILL (from dropdown) ==========
       lockerSelect.addEventListener('change', function(e) {
         if (e.target.value) {
           lockerIdInput.value = e.target.value;
@@ -476,16 +703,19 @@ app.get("/shipments/new", async (req, res) => {
         if (e.target.value) {
           // Reset dropdown if user types manually
           lockerSelect.value = '';
+          document.getElementById('lockerAutoSuggested').style.display = 'none';
         }
       });
       
-      // ========== CUSTOMER AUTO-FILL ==========
-      const customerSelect = document.getElementById('customerSelect');
-      const customerIdInput = document.getElementById('customerId');
-      const receiverNameInput = document.getElementById('receiverName');
-      const receiverPhoneInput = document.getElementById('receiverPhone');
-      
+      // ========== CUSTOMER AUTO-FILL (from dropdown - manual mode only) ==========
       customerSelect.addEventListener('change', function(e) {
+        // Don't allow customer select if active resi is selected
+        if (currentSelectedResi) {
+          alert('⚠️ Active resi sudah dipilih. Reset form jika ingin pilih customer manual.');
+          e.target.value = '';
+          return;
+        }
+        
         const selectedOption = e.target.options[e.target.selectedIndex];
         
         if (selectedOption.value) {
@@ -520,19 +750,41 @@ app.get("/shipments/new", async (req, res) => {
       
       // Allow manual typing to override
       customerIdInput.addEventListener('input', function(e) {
-        if (e.target.value) {
+        if (e.target.value && !currentSelectedResi) {
           // Reset dropdown if user types manually
           customerSelect.value = '';
         }
       });
       
-      function resetCustomerFields() {
+      // ========== FORM VALIDATION ==========
+      document.getElementById('shipmentForm').addEventListener('submit', function(e) {
+        // Validate courier matches resi service type if active resi was selected
+        if (currentSelectedResi && courierSelect.value) {
+          const selectedCourierOption = courierSelect.options[courierSelect.selectedIndex];
+          const courierCompany = selectedCourierOption.getAttribute('data-company');
+          const resiService = currentSelectedResi.courierType.toLowerCase();
+          
+          if (courierCompany !== resiService) {
+            e.preventDefault();
+            alert(\`⚠️ Tidak cocok!\\n\\nResi: \${resiService.toUpperCase()}\\nKurir: \${courierCompany.toUpperCase()}\\n\\nSilakan pilih kurir yang sesuai dengan tipe resi.\`);
+            return false;
+          }
+        }
+        
+        return true;
+      });
+      
+      // ========== RESET ALL FIELDS ==========
+      function resetAllFields() {
+        activeResiSelect.value = '';
         lockerSelect.value = '';
         lockerIdInput.value = '';
         customerSelect.value = '';
         customerIdInput.value = '';
         receiverNameInput.value = '';
         receiverPhoneInput.value = '';
+        resiListTextarea.value = '';
+        resetToManualMode();
       }
     </script>
   `;
