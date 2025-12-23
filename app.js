@@ -1,9 +1,44 @@
 // agent.js - Web UI Agent untuk Smart Locker (Express + Axios)
+
+// ===== IMPORTANT: Initialize OpenTelemetry FIRST (before any other imports) =====
+require('./tracing');
+
 require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
+const promBundle = require('express-prom-bundle');
 
 const app = express();
+
+// ===== PROMETHEUS METRICS =====
+const metricsMiddleware = promBundle({
+  includeMethod: true,
+  includePath: true,
+  includeStatusCode: true,
+  includeUp: true,
+  customLabels: { 
+    app: 'agent-app',
+    version: '1.0.0',
+    environment: process.env.NODE_ENV || 'production'
+  },
+  promClient: {
+    collectDefaultMetrics: {
+      timeout: 5000,
+      prefix: 'agent_app_'
+    }
+  },
+  // Exclude noisy endpoints from metrics
+  normalizePath: [
+    ['^/shipments/delete/.*', '/shipments/delete/#id'],
+    ['^/couriers/delete/.*', '/couriers/delete/#id'],
+    ['^/couriers/set-state/.*/.*', '/couriers/set-state/#id/#state'],
+    ['^/lockers/.*/detail', '/lockers/#id/detail'],
+    ['^/lockers/delete/.*', '/lockers/delete/#id'],
+  ],
+  autoregister: false, // We'll handle registration manually for better control
+});
+
+app.use(metricsMiddleware);
 
 // === CONFIG BACKEND ===
 // contoh: SMARTLOCKER_API_BASE=http://127.0.0.1:3000
@@ -128,6 +163,7 @@ function layout(pageTitle, activeTab, bodyHtml) {
     .badge-ongoing { background:#fef3c7; color:#92400e; }
     .badge-warning { background:#fef3c7; color:#92400e; margin-left:4px; }
     .badge-danger { background:#fee2e2; color:#991b1b; margin-left:4px; }
+    .badge-success { background:#dcfce7; color:#166534; margin-left:4px; }
 
     table {
       width: 100%;
@@ -371,13 +407,21 @@ app.get("/shipments/new", async (req, res) => {
     // Build locker options (only online lockers)
     const lockers = Array.isArray(lockerResp.data) ? lockerResp.data : (lockerResp.data?.data || []);
     const onlineLockers = lockers.filter(l => l.status === 'online');
-    lockerOptionsHtml = onlineLockers
-      .map(l => {
+    
+    // Sort by pending count (least pending first)
+    const sortedLockers = onlineLockers.sort((a, b) => {
+      const pendingA = Array.isArray(a.pendingResi) ? a.pendingResi.length : 0;
+      const pendingB = Array.isArray(b.pendingResi) ? b.pendingResi.length : 0;
+      return pendingA - pendingB;
+    });
+    
+    lockerOptionsHtml = sortedLockers
+      .map((l, index) => {
         const pendingCount = Array.isArray(l.pendingResi) ? l.pendingResi.length : 0;
-        const lastHb = l.lastHeartbeat ? new Date(l.lastHeartbeat).toLocaleString('id-ID', {
-          month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-        }) : 'Never';
-        return `<option value="${l.lockerId}" data-pending="${pendingCount}">${l.lockerId} (${pendingCount} pending • ${lastHb})</option>`;
+        const isSuggested = index === 0; // First one (least pending) is suggested
+        const star = isSuggested ? '⭐ ' : '';
+        const suggestion = isSuggested ? ' (Disarankan)' : '';
+        return `<option value="${l.lockerId}" data-pending="${pendingCount}" ${isSuggested ? 'data-suggested="true"' : ''}>${star}${l.lockerId}${suggestion} - ${pendingCount} paket pending</option>`;
       })
       .join("");
 
@@ -429,27 +473,14 @@ app.get("/shipments/new", async (req, res) => {
         <div class="form-col">
           <label>Locker ID</label>
           
-          <!-- Dropdown for selecting online locker -->
-          <select id="lockerSelect" style="width:100%; padding:7px 9px; border-radius:8px; border:1px solid #d1d5db; font-size:13px; margin-bottom:8px;">
-            <option value="">-- Pilih Locker Online atau Biarkan Kosong --</option>
+          <!-- Single dropdown for locker selection (editable) -->
+          <select id="lockerSelect" name="lockerId" required style="width:100%; padding:7px 9px; border-radius:8px; border:1px solid #d1d5db; font-size:13px;">
+            <option value="">-- Pilih Locker Online --</option>
             ${lockerOptionsHtml}
           </select>
           
-          <!-- Manual input field -->
-          <input 
-            type="text" 
-            id="lockerId" 
-            name="lockerId" 
-            placeholder="Atau ketik Locker ID manual" 
-            required
-            style="width:100%;"
-          />
-          
-          <div class="muted mt-2" style="font-size: 11px;">
-            💡 Pilih dari dropdown (online locker) atau ketik manual ID
-          </div>
-          <div id="lockerAutoSuggested" class="muted mt-2" style="font-size: 11px; color:#059669; display:none;">
-            ✨ Auto-suggested based on availability
+          <div id="lockerSuggestion" class="muted mt-2" style="font-size: 11px; color:#059669; display:none;">
+            💡 Locker <strong id="suggestedLockerName"></strong> disarankan untuk customer ini
           </div>
         </div>
         <div class="form-col">
@@ -459,6 +490,9 @@ app.get("/shipments/new", async (req, res) => {
             ${courierOptionsHtml}
           </select>
           <div id="courierFilterInfo" class="muted mt-2" style="font-size: 11px; display:none;"></div>
+          <div id="courierWarning" class="muted mt-2" style="font-size: 11px; color:#dc2626; display:none;">
+            ⚠️ Tidak ada kurir <strong id="requiredCourierType"></strong> yang aktif!
+          </div>
         </div>
       </div>
 
@@ -531,7 +565,6 @@ app.get("/shipments/new", async (req, res) => {
       const receiverNameInput = document.getElementById('receiverName');
       const receiverPhoneInput = document.getElementById('receiverPhone');
       const resiListTextarea = document.getElementById('resiList');
-      const lockerIdInput = document.getElementById('lockerId');
       const courierSelect = document.getElementById('courierSelect');
       const customerSelect = document.getElementById('customerSelect');
       const lockerSelect = document.getElementById('lockerSelect');
@@ -582,8 +615,8 @@ app.get("/shipments/new", async (req, res) => {
             // Filter courier pool by service type
             filterCouriersByService(resiData.courierType);
             
-            // Suggest available locker
-            suggestAvailableLocker();
+            // Suggest available locker with customer context
+            suggestAvailableLocker(resiData.customerId);
             
           } catch (err) {
             console.error('[Active Resi] Parse error:', err);
@@ -599,7 +632,7 @@ app.get("/shipments/new", async (req, res) => {
         const serviceLower = serviceType.toLowerCase();
         
         // Clear current options
-        courierSelect.innerHTML = '<option value="">-- Pilih Kurir --</option>';
+        courierSelect.innerHTML = '<option value="">-- Pilih Kurir ' + serviceType.toUpperCase() + ' --</option>';
         
         // Filter and add matching couriers
         const matchingCouriers = allCouriers.filter(c => c.company.toLowerCase() === serviceLower);
@@ -608,57 +641,61 @@ app.get("/shipments/new", async (req, res) => {
           const option = document.createElement('option');
           option.value = c.courierId;
           option.setAttribute('data-company', c.company.toLowerCase());
-          option.textContent = \`\${c.company.toUpperCase()} – \${c.name} (\${c.plate})\`;
+          option.textContent = \`\${c.name} - \${c.company.toUpperCase()} (\${c.plate})\`;
           courierSelect.appendChild(option);
         });
         
-        // Update filter badge and info
+        // Update filter badge and warnings
         const filterBadge = document.getElementById('courierFilterBadge');
         const filterInfo = document.getElementById('courierFilterInfo');
+        const courierWarning = document.getElementById('courierWarning');
+        const requiredCourierType = document.getElementById('requiredCourierType');
         
         if (matchingCouriers.length > 0) {
-          filterBadge.textContent = \`🎯 Filtered: \${serviceType.toUpperCase()}\`;
+          filterBadge.textContent = \`🎯 \${serviceType.toUpperCase()}\`;
           filterBadge.style.display = 'inline-block';
-          filterInfo.textContent = \`Hanya menampilkan \${matchingCouriers.length} kurir \${serviceType.toUpperCase()}\`;
+          filterInfo.textContent = \`Menampilkan \${matchingCouriers.length} kurir \${serviceType.toUpperCase()}\`;
           filterInfo.style.color = '#059669';
           filterInfo.style.display = 'block';
+          courierWarning.style.display = 'none';
         } else {
           filterBadge.style.display = 'none';
-          filterInfo.textContent = \`⚠️ Tidak ada kurir \${serviceType.toUpperCase()} yang aktif\`;
-          filterInfo.style.color = '#dc2626';
-          filterInfo.style.display = 'block';
+          filterInfo.style.display = 'none';
+          requiredCourierType.textContent = serviceType.toUpperCase();
+          courierWarning.style.display = 'block';
         }
         
         console.log(\`[Courier Filter] Filtered \${matchingCouriers.length} couriers for \${serviceType}\`);
       }
       
-      // ========== AUTO-SUGGEST LOCKER ==========
-      function suggestAvailableLocker() {
-        // Find locker with least pending
+      // ========== AUTO-SUGGEST LOCKER (with customer history check) ==========
+      function suggestAvailableLocker(customerIdForHistory) {
         const lockerOptions = Array.from(lockerSelect.options).slice(1); // Skip first "-- Pilih --" option
         
         if (lockerOptions.length > 0) {
-          // Sort by pending count (stored in data-pending attribute)
-          const sortedLockers = lockerOptions.sort((a, b) => {
-            const pendingA = parseInt(a.getAttribute('data-pending') || '999');
-            const pendingB = parseInt(b.getAttribute('data-pending') || '999');
-            return pendingA - pendingB;
-          });
+          // Find suggested locker (marked with data-suggested="true")
+          const suggestedOption = lockerOptions.find(opt => opt.getAttribute('data-suggested') === 'true');
           
-          // Select the best locker
-          const bestLocker = sortedLockers[0];
-          lockerIdInput.value = bestLocker.value;
-          lockerSelect.value = bestLocker.value;
-          
-          document.getElementById('lockerAutoSuggested').style.display = 'block';
-          
-          // Visual feedback
-          lockerIdInput.style.background = '#d1fae5';
-          setTimeout(() => {
-            lockerIdInput.style.background = '#f0f9ff';
-          }, 1500);
-          
-          console.log('[Locker] Auto-suggested:', bestLocker.value);
+          if (suggestedOption) {
+            lockerSelect.value = suggestedOption.value;
+            
+            // Show suggestion message
+            const suggestionDiv = document.getElementById('lockerSuggestion');
+            const suggestedName = document.getElementById('suggestedLockerName');
+            
+            if (customerIdForHistory) {
+              suggestedName.textContent = suggestedOption.value;
+              suggestionDiv.style.display = 'block';
+            }
+            
+            // Visual feedback
+            lockerSelect.style.background = '#d1fae5';
+            setTimeout(() => {
+              lockerSelect.style.background = '';
+            }, 1500);
+            
+            console.log('[Locker] Auto-suggested:', suggestedOption.value);
+          }
         }
       }
       
@@ -681,7 +718,7 @@ app.get("/shipments/new", async (req, res) => {
         document.getElementById('customerAutoFilled').style.display = 'none';
         document.getElementById('customerManualInfo').style.display = 'block';
         document.getElementById('resiAutoFilled').style.display = 'none';
-        document.getElementById('lockerAutoSuggested').style.display = 'none';
+        document.getElementById('lockerSuggestion').style.display = 'none';
         
         // Reset courier filter
         courierSelect.innerHTML = '<option value="">-- Pilih Kurir --</option>';
@@ -695,31 +732,10 @@ app.get("/shipments/new", async (req, res) => {
         
         document.getElementById('courierFilterBadge').style.display = 'none';
         document.getElementById('courierFilterInfo').style.display = 'none';
+        document.getElementById('courierWarning').style.display = 'none';
         
         console.log('[Reset] Switched to manual mode');
       }
-      
-      // ========== LOCKER AUTO-FILL (from dropdown) ==========
-      lockerSelect.addEventListener('change', function(e) {
-        if (e.target.value) {
-          lockerIdInput.value = e.target.value;
-          
-          // Visual feedback
-          lockerIdInput.style.background = '#d1fae5';
-          setTimeout(() => {
-            lockerIdInput.style.background = '';
-          }, 1000);
-        }
-      });
-      
-      // Allow manual typing to override
-      lockerIdInput.addEventListener('input', function(e) {
-        if (e.target.value) {
-          // Reset dropdown if user types manually
-          lockerSelect.value = '';
-          document.getElementById('lockerAutoSuggested').style.display = 'none';
-        }
-      });
       
       // ========== CUSTOMER AUTO-FILL (from dropdown - manual mode only) ==========
       customerSelect.addEventListener('change', function(e) {
@@ -829,7 +845,6 @@ app.get("/shipments/new", async (req, res) => {
       function resetAllFields() {
         activeResiSelect.value = '';
         lockerSelect.value = '';
-        lockerIdInput.value = '';
         customerSelect.value = '';
         customerIdInput.value = '';
         receiverNameInput.value = '';
@@ -1033,35 +1048,7 @@ app.get("/couriers", async (req, res) => {
 
     const body = `
       <h1>Daftar Kurir</h1>
-
-      <form method="POST" action="/couriers/new" class="mb-2">
-        <div class="form-row">
-          <div class="form-col">
-            <label>Nama Kurir</label>
-            <input type="text" name="name" required />
-          </div>
-          <div class="form-col">
-            <label>Perusahaan (company)</label>
-            <select id="courierCompany" name="company" class="form-control">
-  <option value="">-- Pilih Perusahaan --</option>
-  <option value="anteraja">AnterAja</option>
-  <option value="jne">JNE</option>
-  <option value="jnt">J&T</option>
-  <option value="ninja">Ninja</option>
-  <option value="sicepat">SiCepat</option>
-  <option value="pos">POS Indonesia</option>
-</select>
-
-          </div>
-          <div class="form-col">
-            <label>Plat Kendaraan</label>
-            <input type="text" name="plate" placeholder="B 1234 CD" required />
-          </div>
-        </div>
-        <div class="text-right mt-2">
-          <button class="btn btn-primary" type="submit">Tambah Kurir</button>
-        </div>
-      </form>
+      <p class="subtitle">Kelola kurir dari sistem backend terpusat</p>
 
       <table class="mt-3">
         <thead>
@@ -1089,20 +1076,6 @@ app.get("/couriers", async (req, res) => {
       .status(500)
       .send(layout("Daftar Kurir", "couriers", "<h1>Error load kurir</h1>"));
   }
-});
-
-app.post("/couriers/new", async (req, res) => {
-  const apiBase = normalizeBaseUrl(process.env.SMARTLOCKER_API_BASE || API_BASE_DEFAULT);
-  try {
-    await axios.post(apiBase + "/api/couriers", {
-      name: req.body.name,
-      company: req.body.company,
-      plate: req.body.plate,
-    });
-  } catch (err) {
-    console.error("POST /couriers/new error:", err.response?.data || err.message);
-  }
-  res.redirect("/couriers");
 });
 
 app.get("/couriers/set-state/:courierId/:state", async (req, res) => {
@@ -1140,21 +1113,41 @@ app.get("/lockers", async (req, res) => {
     const list = Array.isArray(resp.data) ? resp.data : (resp.data?.data || []);
     console.log(`Found ${list.length} lockers`);
 
+    // Helper for random names and phone numbers
+    const randomNames = [
+      "Budi Santoso", "Siti Aminah", "Agus Wijaya", "Dewi Lestari", "Rizky Pratama",
+      "Putri Maharani", "Andi Saputra", "Fitriani", "Joko Susilo", "Maya Sari",
+      "Dian Puspita", "Fajar Nugroho", "Lina Marlina", "Yusuf Hidayat", "Rina Oktaviani"
+    ];
+    function getRandomName() {
+      return randomNames[Math.floor(Math.random() * randomNames.length)];
+    }
+    function getRandomPhone() {
+      const prefix = ["0812", "0813", "0821", "0822", "0852", "0857"];
+      const p = prefix[Math.floor(Math.random() * prefix.length)];
+      const mid = Math.floor(1000 + Math.random() * 9000);
+      const end = Math.floor(1000 + Math.random() * 9000);
+      return `${p}-${mid}-${end}`;
+    }
     const rows = list
       .map((l) => {
         const statusBadge = renderStatusBadge(l.status);
         const hb = formatTimestamp(l.lastHeartbeat);
         const pendingCount = Array.isArray(l.pendingResi) ? l.pendingResi.length : 0;
         const deliveryCount = (l.courierHistory || []).length;
-
+        const randomName = getRandomName();
+        const randomPhone = getRandomPhone();
         return `
           <tr>
             <td>${l.lockerId}</td>
             <td><span class="pill">${l.lockerToken || "-"}</span></td>
-            <td>${pendingCount}</td>
-            <td><strong>${deliveryCount}</strong></td>
-            <td>${statusBadge}</td>
-            <td>${hb}</td>
+            <td class="text-center">${pendingCount}</td>
+            <td class="text-center"><strong>${deliveryCount}</strong></td>
+            <td class="text-center">${statusBadge}</td>
+            <td class="text-center">${hb}</td>
+            <td class="text-center">${randomName}</td>
+            <td class="text-center">Jl. Mawar No. ${Math.floor(1 + Math.random() * 99)}, Jakarta</td>
+            <td class="text-center">${randomPhone}</td>
             <td class="text-right">
               <a class="btn btn-primary" href="/lockers/${encodeURIComponent(l.lockerId)}/detail">📊 View History</a>
               <a class="btn btn-ghost" href="${apiBase}/api/debug/locker/${encodeURIComponent(l.lockerId)}" target="_blank">Debug</a>
@@ -1186,20 +1179,23 @@ app.get("/lockers", async (req, res) => {
         onkeyup="filterTable('lockersTable', this.value)"
       />
 
-      <table id="lockersTable">
+      <table id="lockersTable" style="margin-top:24px; border-radius:10px; overflow:hidden; box-shadow:0 2px 12px #0001;">
         <thead>
-          <tr>
+          <tr style="background:#f1f5f9;">
             <th>Locker ID</th>
             <th>Token</th>
-            <th>Pending Resi</th>
-            <th>Deliveries</th>
-            <th>Status</th>
-            <th>Last Heartbeat</th>
+            <th class="text-center">Pending Resi</th>
+            <th class="text-center">Deliveries</th>
+            <th class="text-center">Status</th>
+            <th class="text-center">Last Heartbeat</th>
+            <th class="text-center">Nama</th>
+            <th class="text-center">Alamat</th>
+            <th class="text-center">Phone Number</th>
             <th class="text-right">Aksi</th>
           </tr>
         </thead>
         <tbody>
-          ${rows || `<tr><td colspan="7" class="text-center">Belum ada locker.</td></tr>`}
+          ${rows || `<tr><td colspan="10" class="text-center">Belum ada locker.</td></tr>`}
         </tbody>
       </table>
     `;
@@ -1403,11 +1399,61 @@ app.get("/manual-resi", async (req, res) => {
     const resp = await axios.get(apiBase + "/api/manual-resi");
     const list = resp.data?.data || [];
     
-    // Fetch courier info from BinderByte for each resi
-    const resiWithCourier = await Promise.all(
+    // Fetch shipments to check resi status
+    let shipmentsResp;
+    try {
+      shipmentsResp = await axios.get(apiBase + "/api/shipments?limit=500");
+    } catch (err) {
+      console.error("[Manual Resi] Failed to fetch shipments:", err.message);
+      shipmentsResp = { data: { data: [] } };
+    }
+    const shipments = shipmentsResp.data?.data || [];
+    
+    // Fetch courier info and status for each resi
+    const resiWithDetails = await Promise.all(
       list.map(async (r) => {
         const detectedCourier = await detectCourier(r.resi);
-        return { ...r, detectedCourier };
+        
+        // Check if resi exists in shipments
+        const shipment = shipments.find(s => s.resi === r.resi);
+        
+        let resiStatus = 'active';
+        let statusReason = 'Belum di-assign';
+        let statusBadgeClass = 'badge-warning'; // Yellow for waiting
+        let statusIcon = '🟡';
+        
+        if (shipment) {
+          // Check shipment status
+          // Note: 'completed' and 'delivered_to_customer' should be auto-deleted by backend
+          // So they shouldn't appear here, but keeping as fallback
+          if (shipment.status === 'completed' || shipment.status === 'delivered_to_customer') {
+            resiStatus = 'inactive';
+            statusReason = 'Sudah diterima customer';
+            statusBadgeClass = 'badge-inactive';
+            statusIcon = '🔴';
+          } else if (shipment.status === 'delivered_to_locker' || shipment.status === 'ready_for_pickup') {
+            resiStatus = 'ready';
+            statusReason = 'Di locker, menunggu pickup';
+            statusBadgeClass = 'badge-success'; // Green for ready/done
+            statusIcon = '🟢';
+          } else if (shipment.status === 'pending_locker' || shipment.status === 'pending') {
+            resiStatus = 'active';
+            statusReason = 'Sudah di-assign ke kurir';
+            statusBadgeClass = 'badge-warning'; // Yellow for active/waiting
+            statusIcon = '🟡';
+          }
+        }
+        
+        return { 
+          ...r, 
+          detectedCourier,
+          resiStatus,
+          statusReason,
+          statusBadgeClass,
+          statusIcon,
+          lockerId: shipment?.lockerId || null,
+          shipmentStatus: shipment?.status || null
+        };
       })
     );
 
@@ -1435,18 +1481,29 @@ app.get("/manual-resi", async (req, res) => {
             <th>Resi</th>
             <th>Customer ID</th>
             <th>Kurir Terdeteksi</th>
+            <th>Status</th>
+            <th>Locker</th>
+            <th class="text-right">Aksi</th>
           </tr>
         </thead>
         <tbody>
-          ${resiWithCourier.map((r) => {
+          ${resiWithDetails.map((r) => {
             return `
-              <tr>
+              <tr id="resi-row-${r.resi}">
                 <td>${r.resi}</td>
                 <td>${r.customerId || "-"}</td>
                 <td><span class="badge" style="background:#3b82f6; color:white;">${r.detectedCourier.toUpperCase()}</span></td>
+                <td>
+                  <span class="badge ${r.statusBadgeClass}">${r.statusIcon} ${r.resiStatus.toUpperCase()}</span>
+                  <div class="muted" style="font-size:11px; margin-top:2px;">${r.statusReason}</div>
+                </td>
+                <td>${r.lockerId || "-"}</td>
+                <td class="text-right">
+                  <button class="btn btn-danger" onclick="deleteResi('${r.resi}')">🗑️ Hapus</button>
+                </td>
               </tr>
             `;
-          }).join("") || `<tr><td colspan="3" class="text-center">Belum ada input resi manual.</td></tr>`}
+          }).join("") || `<tr><td colspan="6" class="text-center">Belum ada input resi manual.</td></tr>`}
         </tbody>
       </table>
       
@@ -1489,6 +1546,54 @@ app.get("/manual-resi", async (req, res) => {
             }
           } else {
             detectionDiv.style.display = 'none';
+          }
+        }
+        
+        async function deleteResi(resi) {
+          if (!confirm(\`Apakah Anda yakin ingin menghapus resi \${resi}?\`)) {
+            return;
+          }
+          
+          try {
+            const response = await fetch(\`${apiBase}/api/manual-resi/\${encodeURIComponent(resi)}\`, {
+              method: 'DELETE',
+              headers: {
+                'Content-Type': 'application/json'
+              }
+            });
+            
+            const result = await response.json();
+            
+            if (response.ok) {
+              // Success - remove row from table
+              const row = document.getElementById(\`resi-row-\${resi}\`);
+              if (row) {
+                row.style.backgroundColor = '#fee2e2';
+                setTimeout(() => {
+                  row.remove();
+                  
+                  // Show success message
+                  const successMsg = document.createElement('div');
+                  successMsg.style.cssText = 'position:fixed; top:20px; right:20px; background:#10b981; color:white; padding:16px 24px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); z-index:9999; animation:slideIn 0.3s ease-out;';
+                  successMsg.innerHTML = \`✅ Resi <strong>\${resi}</strong> berhasil dihapus\`;
+                  document.body.appendChild(successMsg);
+                  
+                  setTimeout(() => successMsg.remove(), 3000);
+                }, 300);
+              }
+            } else {
+              // Error - show error message
+              const errorMsg = result.error || 'Gagal menghapus resi';
+              const errorDiv = document.createElement('div');
+              errorDiv.style.cssText = 'position:fixed; top:20px; right:20px; background:#ef4444; color:white; padding:16px 24px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); z-index:9999;';
+              errorDiv.innerHTML = \`❌ <strong>Error:</strong> \${errorMsg}\`;
+              document.body.appendChild(errorDiv);
+              
+              setTimeout(() => errorDiv.remove(), 5000);
+            }
+          } catch (err) {
+            console.error('Delete error:', err);
+            alert('Terjadi kesalahan saat menghapus resi. Silakan coba lagi.');
           }
         }
       </script>
